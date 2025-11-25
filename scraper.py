@@ -3,9 +3,9 @@ from datetime import date
 import random
 
 SHEETDB_URL = "https://sheetdb.io/api/v1/ou6vl5uzwgsda"
-API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
+API_TOKEN = "9Zpdu5nIGp2Vi3YE5OYVCa7ETsO4Zv1FCtpoggx8aFp5Ely519Z9SgFcEy1B"
 
-headers = {"x-apisports-key": API_KEY}
+headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
 def inserisci(partita, pronostico, quota, tipo, stake, prob):
     payload = [{
@@ -23,83 +23,64 @@ def inserisci(partita, pronostico, quota, tipo, stake, prob):
         pass
 
 # Fixture di oggi (1 call)
-fixtures_response = requests.get(
-    f"https://v3.football.api-sports.io/fixtures?date={date.today()}",
+fixtures = requests.get(
+    "https://api.sportmonks.com/v3/football/fixtures/date/2025-11-25?include=predictions",
     headers=headers
-).json()
+).json()["data"]
 
-if "response" not in fixtures_response or not fixtures_response["response"]:
-    print("No fixtures today")
-else:
-    fixtures = fixtures_response["response"]
-    print(f"Partite di oggi: {len(fixtures)}")
+print(f"Partite di oggi: {len(fixtures)}")
 
-    high_prob = []
-    for match in fixtures[:50]:  # 50 per velocità
-        fixture_id = match["fixture"]["id"]
-        home = match["teams"]["home"]["name"]
-        away = match["teams"]["away"]["name"]
-        league = match["league"]["name"]
+high_prob = []
 
-        # Skip non adulti
-        if "U19" in home or "U19" in away or "Youth" in league:
-            continue
+for match in fixtures[:100]:
+    home = match["name"]
+    away = match["opponent_name"]
+    league = match["league"]["name"]
 
-        pred_response = requests.get(
-            f"https://v3.football.api-sports.io/predictions?fixture={fixture_id}",
-            headers=headers
-        ).json()
+    # Skip U19/Youth/Women
+    if any(x in f"{home} {away} {league}" for x in ["U19", "Youth", "U21", "Women"]):
+        continue
 
-        if "response" in pred_response and pred_response["response"]:
-            pred = pred_response["response"][0]["predictions"]
-            try:
-                over25_str = pred.get("over_2_5", "50%")
-                over25_prob = float(over25_str.replace("%", "")) / 100
-                quota_over25 = round(1 / over25_prob * random.uniform(0.94, 1.06), 2)
+    # Predictions reali (sempre presenti con Sportmonks)
+    try:
+        pred = match["predictions"][0]
 
-                over15_str = pred.get("over_1_5", "80%")
-                over15_prob = float(over15_str.replace("%", "")) / 100
-                quota_over15 = round(1 / over15_prob * random.uniform(0.94, 1.06), 2)
+        over15_prob = pred["over_1_5"]["probability"] / 100
+        over25_prob = pred["over_2_5"]["probability"] / 100
+        btts_prob = pred["btts"]["probability"] / 100
+        corners_prob = pred["corners_over_9_5"]["probability"] / 100 if "corners_over_9_5" in pred else 0
+        cards_prob = pred["cards_over_4_5"]["probability"] / 100 if "cards_over_4_5" in pred else 0
 
-                btts_str = pred.get("btts_yes", "50%")
-                btts_prob = float(btts_str.replace("%", "")) / 100
-                quota_btts = round(1 / btts_prob * random.uniform(0.94, 1.06), 2)
+        partita = f"{home} - {away}"
 
-                # Alta prob filter (>70%)
-                if over15_prob > 0.90:
-                    high_prob.append((f"{home} - {away}", "Over 1.5", quota_over15, "over15_safe", 10, over15_prob))
+        # Alta probabilità (>70%)
+        if over15_prob > 0.90:
+            quota = round(1 / over15_prob * random.uniform(0.94, 1.06), 2)
+            high_prob.append((partita, "Over 1.5", quota, "over15_safe", 10, over15_prob))
 
-                if over25_prob > 0.70:
-                    high_prob.append((f"{home} - {away}", "Over 2.5", quota_over25, "raddoppio", 5, over25_prob))
+        if over25_prob > 0.75:
+            quota = round(1 / over25_prob * random.uniform(0.94, 1.06), 2)
+            high_prob.append((partita, "Over 2.5", quota, "raddoppio", 5, over25_prob))
 
-                if btts_prob > 0.70:
-                    high_prob.append((f"{home} - {away}", "BTTS Yes", quota_btts, "multipla10", 0.5, btts_prob))
+        if btts_prob > 0.70:
+            quota = round(1 / btts_prob * random.uniform(0.94, 1.06), 2)
+            high_prob.append((partita, "BTTS Yes", quota, "multipla10", 0.5, btts_prob))
 
-            except:
-                # Fallback Poisson su lambda 3.0
-                lambda_total = 3.0
-                over25_prob = 1 - poisson.cdf(2, lambda_total)
-                quota_over25 = round(1 / over25_prob, 2)
-                high_prob.append((f"{home} - {away}", "Over 2.5", quota_over25, "multipla10", 0.5, over25_prob))
+        if corners_prob > 0.75:
+            quota = round(1 / corners_prob * random.uniform(0.94, 1.06), 2)
+            high_prob.append((partita, "Over 9.5 Corners", quota, "multipla10", 0.5, corners_prob))
 
-    # Ordina per prob alta
-    high_prob = sorted(high_prob, key=lambda x: x[5], reverse=True)[:50]
+        if cards_prob > 0.70:
+            quota = round(1 / cards_prob * random.uniform(0.94, 1.06), 2)
+            high_prob.append((partita, "Over 4.5 Cards", quota, "multipla10", 0.5, cards_prob))
 
-    for p in high_prob:
-        inserisci(*p)
+    except:
+        continue  # skip se predictions non disponibili
 
-    # Bomba (1 con prob bassa)
-    if fixtures:
-        match = random.choice(fixtures)
-        home = match["teams"]["home"]["name"]
-        away = match["teams"]["away"]["name"]
-        inserisci(f"{home} - {away}", "Exact Score 3-1", round(random.uniform(14, 22), 1), "bomba", 1, 0.11)
+# Ordina per probabilità
+high_prob = sorted(high_prob, key=lambda x: x[5], reverse=True)[:50]
 
-    # Usage (1 call)
-    usage_response = requests.get("https://v3.football.api-sports.io/usage", headers=headers).json()
-    if "response" in usage_response:
-        usage = usage_response["response"]
-        calls_used = usage.get("calls_used_today", 0)
-        print(f"Calls usate oggi: {calls_used}/7500")
+for p in high_prob:
+    inserisci(*p)
 
-    print(f"{date.today()} – {len(high_prob)} pronostici alta prob inseriti – Errori gestiti")
+print(f"{date.today()} – {len(high_prob)} pronostici alta probabilità inseriti – Sportmonks funziona")
