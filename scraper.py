@@ -60,7 +60,10 @@ df = pd.DataFrame(partite_oggi)
 # Poisson
 def calcola_prob(xg_home, xg_away, soglia=2):
     lambda_total = xg_home + xg_away
-    prob = 1 - sum((lambda_total**k * np.exp(-lambda_total)) / np.math.factorial(k) for k in range(soglia + 1))
+   import math   # ← aggiungi questa riga in alto con gli altri import (dopo import numpy as np)
+
+# poi la riga diventa:
+prob = 1 - sum((lambda_total**k * np.exp(-lambda_total)) / math.factorial(k) for k in range(soglia + 1))
     quota = round(1 / prob, 2)
     return prob, quota
 
@@ -89,5 +92,6 @@ bomba = df[df['quota_over25'] > 8.0].head(1)
 if not bomba.empty:
     row = bomba.iloc[0]
     inserisci(row['partita'], "Exact Score 3-1", 12.5, "bomba", 1, 0.15)
+
 
 print(f"{today} – {len(df)} partite calcio analizzate – pronostici inseriti")
