@@ -35,61 +35,52 @@ else:
     fixtures = fixtures_response["response"]
     print(f"Partite di oggi: {len(fixtures)}")
 
-    # Stats per 10 leagues principali (10 calls, incl. National League Cup ID 534)
-    leagues = [2, 39, 78, 135, 61, 71, 140, 144, 534, 135]
-    lambda_medio = {}
-    for lid in leagues:
-        stats_response = requests.get(
-            f"https://v3.football.api-sports.io/leagues/statistics?league={lid}&season=2025",
-            headers=headers
-        ).json()
-        if "response" in stats_response and stats_response["response"]:
-            stats = stats_response["response"]
-            avg_goals = sum(s["goals"]["for"]["total"]["total"] for s in stats if "goals" in s) / len(stats) + sum(s["goals"]["against"]["total"]["total"] for s in stats if "goals" in s) / len(stats)
-            lambda_medio[lid] = avg_goals / 2 if avg_goals else 2.8
-        else:
-            lambda_medio[lid] = 2.8
+    pronostici = []  # Definito qui
 
-    high_prob = []
-    for match in fixtures[:50]:
-        lid = match["league"]["id"]
+    for match in fixtures[:30]:
+        home_id = match["teams"]["home"]["id"]
+        away_id = match["teams"]["away"]["id"]
         home = match["teams"]["home"]["name"]
         away = match["teams"]["away"]["name"]
-        league = match["league"]["name"]
 
-        if "U19" in home or "U19" in away or "Youth" in league:
+        if any(x in f"{home} {away}" for x in ["U19", "Youth", "U21", "Women"]):
             continue
 
-        lambda_total = lambda_medio.get(lid, 2.8)
+        # Stats home & away (2 calls)
+        h_stats = requests.get(f"https://v3.football.api-sports.io/teams/statistics?team={home_id}&season=2025", headers=headers).json().get("response", {})
+        a_stats = requests.get(f"https://v3.football.api-sports.io/teams/statistics?team={away_id}&season=2025", headers=headers).json().get("response", {})
 
-        # Poisson per over 2.5
-        over25_prob = 1 - poisson.cdf(2, lambda_total)
-        quota_over25 = round(1 / over25_prob * random.uniform(0.94, 1.06), 2)
+        if not h_stats or not a_stats:
+            continue
 
-        # Poisson per over 1.5
-        over15_prob = 1 - poisson.cdf(1, lambda_total)
-        quota_over15 = round(1 / over15_prob * random.uniform(0.94, 1.06), 2)
+        gf_h = float(h_stats.get("goals", {}).get("for", {}).get("average", {}).get("total", 1.4))
+        ga_h = float(h_stats.get("goals", {}).get("against", {}).get("average", {}).get("total", 1.4))
+        gf_a = float(a_stats.get("goals", {}).get("for", {}).get("average", {}).get("total", 1.4))
+        ga_a = float(a_stats.get("goals", {}).get("against", {}).get("average", {}).get("total", 1.4))
 
-        # BTTS approx
-        btts_prob = (1 - poisson.pmf(0, lambda_total / 2)) ** 2
-        quota_btts = round(1 / btts_prob * random.uniform(0.94, 1.06), 2)
+        xG_home = gf_h * ga_a * 1.05
+        xG_away = gf_a * ga_h
+        total_xG = xG_home + xG_away
 
-        partita = f"{home} - {away} ({league})"
+        over15 = 1 - poisson.cdf(1, total_xG)
+        over25 = 1 - poisson.cdf(2, total_xG)
+        btts = (1 - poisson.pmf(0, xG_home)) * (1 - poisson.pmf(0, xG_away))
 
-        # Alta prob (>70%)
-        if over15_prob > 0.90:
-            high_prob.append((partita, "Over 1.5", quota_over15, "over15_safe", 10, over15_prob))
+        partita = f"{home} - {away}"
 
-        if over25_prob > 0.70:
-            high_prob.append((partita, "Over 2.5", quota_over25, "raddoppio", 5, over25_prob))
+        if over15 > 0.90:
+            pronostici.append((partita, "Over 1.5", round(1/over15*1.03,2), "over15_safe", 10, over15))
 
-        if btts_prob > 0.70:
-            high_prob.append((partita, "BTTS Yes", quota_btts, "multipla10", 0.5, btts_prob))
+        if over25 > 0.72:
+            pronostici.append((partita, "Over 2.5", round(1/over25*1.05,2), "raddoppio", 5, over25))
+
+        if btts > 0.68:
+            pronostici.append((partita, "BTTS Yes", round(1/btts*1.05,2), "multipla10", 0.5, btts))
 
     # Ordina per prob alta
-    high_prob = sorted(high_prob, key=lambda x: x[5], reverse=True)[:50]
+    pronostici = sorted(pronostici, key=lambda x: x[5], reverse=True)[:50]
 
-    for p in high_prob:
+    for p in pronostici:
         inserisci(*p)
 
-    print(f"{date.today()} – {len(high_prob)} pronostici alta prob inseriti – Poisson su stats reali")
+    print(f"{date.today()} – {len(pronostici)} pronostici reali inseriti – funziona")
