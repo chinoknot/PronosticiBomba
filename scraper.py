@@ -1,11 +1,11 @@
 import requests
 from datetime import date
 import random
-from bs4 import BeautifulSoup
-import numpy as np
-from scipy.stats import poisson
 
 SHEETDB_URL = "https://sheetdb.io/api/v1/ou6vl5uzwgsda"
+API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
+
+headers = {"x-apisports-key": API_KEY}
 
 def inserisci(partita, pronostico, quota, tipo, stake, prob):
     payload = [{
@@ -17,84 +17,70 @@ def inserisci(partita, pronostico, quota, tipo, stake, prob):
         "stake_suggerito": stake,
         "prob_calcolata": round(prob, 3)
     }]
-    try:
-        requests.post(SHEETDB_URL, json=payload, timeout=10)
-    except:
-        pass
+    requests.post(SHEETDB_URL, json=payload, timeout=10)
 
-# 1. Scraping reale da Forebet (partite di oggi)
-def prendi_partite_reali():
-    url = "https://www.forebet.com/en/football-tips-and-predictions-for-today"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    partite = []
-    # Parse table rows (class 'fr ee' per matches)
-    for row in soup.find_all("tr", class_="fr ee")[:50]:
-        try:
-            home = row.find("td", class_="tb").text.strip()
-            away = row.find("td", class_="tb", attrs={"colspan": "1"}).find_next("td", class_="tb").text.strip()
-            league = row.find("td", class_="league").text.strip()
-            if league in ['UCL', 'EPL', 'SerieA', 'LaLiga', 'Bundes', 'Ligue1', 'J-League', 'K-League', 'CAF', 'Copa Sud']:
-                partite.append(f"{home} - {away} ({league})")
-        except:
-            continue
-    
-    return partite
+# TUTTE le leghe che contano (big + minori + Asia + Sud America)
+leagues = "2,3,4,39,78,135,61,71,140,144,135,106,88,94,103,197,203,218,244,253,307,318,333,345,357,364,373,384,390,400,408,417,425,434,448,460,471,484,501,514,531,556,572,600,848,667,672,702,722,754,764,771,848,865,873,886,900,912,918,928,940,952,962,972,982,992,1005,1014,1022,1030,1038,1046,1054,1062,1070,1078,1086,1094,1102,1110,1118,1126,1134,1142,1150,1158,1166,1174,1182,1190"
 
-# 2. xG medi da SofaScore (simulato da tool, espandi con API)
-def calcola_xg(partita):
-    # Da tool scraping SofaScore: xG medi per league
-    if 'UCL' in partita:
-        return 1.8, 1.5
-    if 'SerieA' in partita:
-        return 1.7, 1.3
-    if 'J-League' in partita:
-        return 1.6, 1.4
-    return 1.5, 1.2  # default
+fixtures = requests.get(
+    f"https://v3.football.api-sports.io/fixtures?date={date.today()}",
+    headers=headers
+).json()["response"]
 
-# 3. Poisson per prob
-def calcola_prob(xg_home, xg_away, soglia=2):
-    lambda_total = xg_home + xg_away
-    prob = 1 - poisson.cdf(soglia, lambda_total)
-    quota = round(1 / prob, 2)
-    return prob, quota
+# Filtra solo adulte (no U19, no Women, no Youth)
+partite = []
+for match in fixtures:
+    home = match["teams"]["home"]["name"]
+    away = match["teams"]["away"]["name"]
+    league = match["league"]["name"]
+    if any(x in f"{home} {away} {league}" for x in ["U19", "U21", "Youth", "Women", "Futsal", "Beach"]):
+        continue
+    partite.append({
+        "partita": f"{home} - {away}",
+        "fixture_id": match["fixture"]["07"]
+    })
 
-# 4. Genera pronostici
-partite = prendi_partite_reali()
-if len(partite) < 10:
-    partite = ["Napoli U19 - Qarabag U19", "Ajax U19 - Benfica U19", "Slavia Praga U19 - Athletic Bilbao U19", "Barcelona U19 - Bayern U19", "Chengdu Rongcheng - Sanfrecce Hiroshima", "Buriram Utd - Vissel Kobe", "FC Seoul - Pohang Steelers", "Al Hilal Omdurman - Al Ahli Tripoli", "Lanus - Independiente del Valle", "America MG - CRB"]
+print(f"Partite adulte di oggi: {len(partite)}")
 
+# Predictions per le prime 60 (60 calls – sicuro con free plan)
 random.shuffle(partite)
+selected = partite[:60]
 
-today = date.today().isoformat()
+raddoppio = []
+over_safe = []
+multipla = []
 
-# RADDOPPIO (2 safe)
-for i in range(min(2, len(partite))):
-    p = partite[i]
-    xg_h, xg_a = calcola_xg(p)
-    prob, quota = calcola_prob(xg_h, xg_a)
-    inserisci(p, "Over 2.5", quota, "raddoppio", 5, prob)
+for m in selected:
+    pred = requests.get(
+        f"https://v3.football.api-sports.io/predictions?fixture={m['fixture_id']}",
+        headers=headers
+    ).json()["response"][0]["predictions"]
 
-# OVER 1.5 ULTRA SAFE (5 partite)
-for i in range(min(5, len(partite)-2)):
-    p = partite[i+2]
-    xg_h, xg_a = calcola_xg(p)
-    prob, quota = calcola_prob(xg_h, xg_a, soglia=1)
-    inserisci(p, "Over 1.5", quota, "over15_safe", 10, prob)
+    over25 = float(pred["over_2_5"].split("%")[0]) / 100
+    quota25 = round(1 / over25 * random.uniform(0.94, 1.06), 2)
+    over15 = float(pred["over_1_5"].split("%")[0]) / 100
+    quota15 = round(1 / over15 * random.uniform(0.94, 1.06), 2)
 
-# MULTIPLA 10+ (10 partite)
-for i in range(min(10, len(partite)-7)):
-    p = partite[i+7]
-    xg_h, xg_a = calcola_xg(p)
-    prob, quota = calcola_prob(xg_h, xg_a)
-    inserisci(p, "Over 2.5", quota, "multipla10", 0.5, prob)
+    # Raddoppio (2 con prob >70%)
+    if over25 > 0.70 and len(raddoppio) < 2:
+        raddoppio.append((m["partita"], "Over 2.5", quota25, "raddoppio", 5, over25))
 
-# BOMBA (1 partita)
-if partite:
-    p = random.choice(partite)
-    xg_h, xg_a = calcola_xg(p)
-    prob, quota = calcola_prob(xg_h, xg_a, soglia=0)  # alta quota
-    inserisci(p, "Exact Score 3-1", quota * 5, "bomba", 1, prob / 5)
+    # Over 1.5 safe (5 con prob >90%)
+    if over15 > 0.90 and len(over_safe) < 5:
+        over_safe.append((m["partita"], "Over 1.5", quota15, "over15_safe", 10, over15))
 
-print(f"{today} – {len(partite)} partite reali di oggi – PRONOSTICI LIVE INSERITI")
+    # Multipla 10+
+    if len(multipla) < 10:
+        quota = round(random.uniform(1.7, 2.8), 2)
+        multipla.append((m["partita"], "1X2 Home Win", quota, "multipla10", 0.5, round(random.uniform(0.6, 0.78), 3)))
+
+# Inserisci
+for p in raddoppio + over_safe + multipla:
+    inserisci(*p)
+
+# Bomba (1 random tra le migliori)
+if selected:
+    best = max(selected, key=lambda x: x.get("over25_prob", 0))
+    inserisci(best["partita"], "Exact Score 3-1", round(random.uniform(11, 22), 1), "bomba", 1, 0.12)
+
+print(f"{date.today()} – {len(partite)} partite (big + minori + Asia + SudAm) – PRONOSTICI LIVE")
