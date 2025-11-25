@@ -1,11 +1,12 @@
 import requests
 from datetime import date
 import random
+from scipy.stats import poisson
 
 SHEETDB_URL = "https://sheetdb.io/api/v1/ou6vl5uzwgsda"
-API_TOKEN = "9Zpdu5nIGp2Vi3YE5OYVCa7ETsO4Zv1FCtpoggx8aFp5Ely519Z9SgFcEy1B"
+API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
 
-headers = {"Authorization": f"Bearer {API_TOKEN}"}
+headers = {"x-apisports-key": API_KEY}
 
 def inserisci(partita, pronostico, quota, tipo, stake, prob):
     payload = [{
@@ -22,63 +23,68 @@ def inserisci(partita, pronostico, quota, tipo, stake, prob):
     except:
         pass
 
-# Fixture di oggi con predictions (1 call)
-response = requests.get(
-    "https://api.sportmonks.com/v3/football/fixtures/today?include=predictions",
+# Fixture di oggi (1 call)
+fixtures_response = requests.get(
+    f"https://v3.football.api-sports.io/fixtures?date={date.today()}",
     headers=headers
-)
+).json()
 
-if response.status_code != 200 or not response.json().get("data"):
-    print("No fixtures or error")
+if "response" not in fixtures_response:
+    print("No fixtures")
 else:
-    fixtures = response.json()["data"]
+    fixtures = fixtures_response["response"]
     print(f"Partite di oggi: {len(fixtures)}")
+
+    # Stats per 10 leagues principali (10 calls, incl. National League Cup ID 534)
+    leagues = [2, 39, 78, 135, 61, 71, 140, 144, 534, 135]
+    lambda_medio = {}
+    for lid in leagues:
+        stats_response = requests.get(
+            f"https://v3.football.api-sports.io/leagues/statistics?league={lid}&season=2025",
+            headers=headers
+        ).json()
+        if "response" in stats_response and stats_response["response"]:
+            stats = stats_response["response"]
+            avg_goals = sum(s["goals"]["for"]["total"]["total"] for s in stats if "goals" in s) / len(stats) + sum(s["goals"]["against"]["total"]["total"] for s in stats if "goals" in s) / len(stats)
+            lambda_medio[lid] = avg_goals / 2 if avg_goals else 2.8
+        else:
+            lambda_medio[lid] = 2.8
 
     high_prob = []
     for match in fixtures[:50]:
-        home = match["name"]
-        away = match["opponent_name"]
+        lid = match["league"]["id"]
+        home = match["teams"]["home"]["name"]
+        away = match["teams"]["away"]["name"]
         league = match["league"]["name"]
-        fixture_id = match["id"]
 
         if "U19" in home or "U19" in away or "Youth" in league:
             continue
 
-        # Predictions (sempre presenti in include=predictions)
-        pred = match["predictions"][0] if "predictions" in match and match["predictions"] else None
+        lambda_total = lambda_medio.get(lid, 2.8)
 
-        if pred:
-            over15_prob = pred.get("over_1_5_probability", 0.85) / 100
-            over25_prob = pred.get("over_2_5_probability", 0.65) / 100
-            btts_prob = pred.get("btts_probability", 0.60) / 100
-            corners_prob = pred.get("corners_over_9_5_probability", 0.70) / 100
-            cards_prob = pred.get("cards_over_4_5_probability", 0.65) / 100
+        # Poisson per over 2.5
+        over25_prob = 1 - poisson.cdf(2, lambda_total)
+        quota_over25 = round(1 / over25_prob * random.uniform(0.94, 1.06), 2)
 
-            partita = f"{home} - {away} ({league})"
+        # Poisson per over 1.5
+        over15_prob = 1 - poisson.cdf(1, lambda_total)
+        quota_over15 = round(1 / over15_prob * random.uniform(0.94, 1.06), 2)
 
-            # Alta prob (>70%)
-            if over15_prob > 0.90:
-                quota = round(1 / over15_prob * random.uniform(0.94, 1.06), 2)
-                high_prob.append((partita, "Over 1.5", quota, "over15_safe", 10, over15_prob))
+        # BTTS approx
+        btts_prob = (1 - poisson.pmf(0, lambda_total / 2)) ** 2
+        quota_btts = round(1 / btts_prob * random.uniform(0.94, 1.06), 2)
 
-            if over25_prob > 0.70:
-                quota = round(1 / over25_prob * random.uniform(0.94, 1.06), 2)
-                high_prob.append((partita, "Over 2.5", quota, "raddoppio", 5, over25_prob))
+        partita = f"{home} - {away} ({league})"
 
-            if btts_prob > 0.70:
-                quota = round(1 / btts_prob * random.uniform(0.94, 1.06), 2)
-                high_prob.append((partita, "BTTS Yes", quota, "multipla10", 0.5, btts_prob))
+        # Alta prob (>70%)
+        if over15_prob > 0.90:
+            high_prob.append((partita, "Over 1.5", quota_over15, "over15_safe", 10, over15_prob))
 
-            if corners_prob > 0.75:
-                quota = round(1 / corners_prob * random.uniform(0.94, 1.06), 2)
-                high_prob.append((partita, "Over 9.5 Corners", quota, "multipla10", 0.5, corners_prob))
+        if over25_prob > 0.70:
+            high_prob.append((partita, "Over 2.5", quota_over25, "raddoppio", 5, over25_prob))
 
-            if cards_prob > 0.70:
-                quota = round(1 / cards_prob * random.uniform(0.94, 1.06), 2)
-                high_prob.append((partita, "Over 4.5 Cards", quota, "multipla10", 0.5, cards_prob))
-        else:
-            # Fallback se no predictions
-            high_prob.append((f"{home} - {away}", "Over 1.5", 1.25, "over15_safe", 10, 0.92))
+        if btts_prob > 0.70:
+            high_prob.append((partita, "BTTS Yes", quota_btts, "multipla10", 0.5, btts_prob))
 
     # Ordina per prob alta
     high_prob = sorted(high_prob, key=lambda x: x[5], reverse=True)[:50]
@@ -86,4 +92,4 @@ else:
     for p in high_prob:
         inserisci(*p)
 
-    print(f"{date.today()} – {len(high_prob)} pronostici alta prob inseriti – Sportmonks Predictions")
+    print(f"{date.today()} – {len(high_prob)} pronostici alta prob inseriti – Poisson su stats reali")
