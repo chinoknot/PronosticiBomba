@@ -2,4 +2,5 @@ requests
 beautifulsoup4
 pandas
 numpy
+lxml
 scipy
