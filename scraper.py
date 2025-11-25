@@ -5,7 +5,7 @@ import math
 from datetime import date
 
 SUPABASE_URL = "https://oiudaxsyvhjpjjhglejd.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdWRheHN5dmhqcGpqaGdsZWpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQwMDk0OTcsImV4cCI6MjA3OTU4NTQ5N30.r7kz3FdijAhsJLz1DcEtobJLaPCqygrQGgCPpSc-05A"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdWRheHN5dmhqcGpqaGdsZWpkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDAwOTQ5NywiZXhwIjoyMDc5NTg1NDk3fQ.S59NSuWyqT9QBh33YD8OxB0rnO8_6CjLXC2M5wwW120"
 
 headers = {
     "apikey": SUPABASE_KEY,
@@ -69,3 +69,4 @@ bomba = df.sample(1).iloc[0]
 inserisci(bomba['partita'], "Exact Score 3-1", round(np.random.uniform(11, 18), 1), "bomba", 1, 0.12)
 
 print(f"{today} – {len(df)} partite analizzate – PRONOSTICI INSERITI")
+
