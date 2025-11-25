@@ -32,7 +32,7 @@ df = pd.DataFrame(partite)
 
 def poisson_prob(xg_home, xg_away, soglia=2):
     l = xg_home + xg_away
-    prob = 1 - sum((l**k * np.exp(-l)) / np.math.factorial(k) for k in range(soglia + 1))
+    prob = 1 - sum((l**k * np.exp(-l)) / math.factorial(k) for k in range(soglia + 1))
     quota = max(1.01, round(1/prob * random.uniform(0.93, 1.07), 2))
     return prob, quota
 
@@ -60,3 +60,4 @@ bomba = df.sample(1).iloc[0]
 inserisci(bomba['partita'], "Exact Score 3-1", round(random.uniform(11,18),1), "bomba", 1, 0.12)
 
 print(f"{today} – Pronostici inseriti con successo!")
+
