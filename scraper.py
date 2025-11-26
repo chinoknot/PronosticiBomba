@@ -687,26 +687,38 @@ def build_categories(picks):
 
 
 # ==========================
-# SHEETDB
+# SHEETDB (DEBUG)
 # ==========================
 
 def sheetdb_clear_sheet(sheet_name):
-    try:
-        url = f"{SHEETDB_URL}?sheet={urllib.parse.quote(sheet_name)}"
-        requests.delete(url, timeout=20)
-    except Exception as e:
-        print(f"# ERRORE clear sheet {sheet_name}: {e}", file=sys.stderr)
+    """
+    Per ora NON cancelliamo niente, stampiamo solo nei log.
+    Così non facciamo DELETE strane su SheetDB.
+    """
+    print(f"# SheetDB: clear DISABLED for sheet={sheet_name}", file=sys.stderr)
 
 
 def sheetdb_append_rows(sheet_name, rows):
     if not rows:
+        print(f"# SheetDB: nessuna riga da inviare per sheet={sheet_name}", file=sys.stderr)
         return
+
     try:
-        url = f"{SHEETDB_URL}?sheet={urllib.parse.quote(sheet_name)}"
+        # Usiamo l'endpoint base + parametro sheet
+        params = {"sheet": sheet_name}
         payload = {"data": rows}
-        requests.post(url, json=payload, timeout=30)
+
+        print(f"# SheetDB: POST -> {SHEETDB_URL} sheet={sheet_name} rows={len(rows)}", file=sys.stderr)
+        r = requests.post(SHEETDB_URL, params=params, json=payload, timeout=30)
+
+        print(
+            f"# SheetDB: risposta sheet={sheet_name} "
+            f"status={r.status_code} body={r.text[:300]}",
+            file=sys.stderr,
+        )
     except Exception as e:
-        print(f"# ERRORE append sheet {sheet_name}: {e}", file=sys.stderr)
+        print(f"# ERRORE SheetDB append sheet={sheet_name}: {e}", file=sys.stderr)
+
 
 
 def push_raw_and_picks_to_sheetdb(rows, categories):
@@ -843,4 +855,5 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
