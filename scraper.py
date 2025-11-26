@@ -6,6 +6,7 @@ import math
 import http.server
 import socketserver
 import urllib.parse
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -21,11 +22,9 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Render user must set this env to the SheetDB endpoint
 SHEETDB_URL = os.environ.get("SHEETDB_URL", "https://sheetdb.io/api/v1/ou6vl5uzwgsda")
 
-# timezone per la data di oggi
-TZ = timezone.utc  # puoi cambiarla se vuoi
+TZ = timezone.utc
 
 RUN_MARKER_PATH = "/tmp/last_run_marker.txt"
 TEAM_STATS_CACHE = {}
@@ -259,7 +258,7 @@ def get_team_statistics_raw(league_id, season, team_id):
         print(f"# ERRORE /teams/statistics {key}: {e}", file=sys.stderr)
         ts = {}
     TEAM_STATS_CACHE[key] = ts
-    time.sleep(0.2)  # throttling base
+    time.sleep(0.2)
     return ts
 
 
@@ -267,7 +266,6 @@ def flatten_team_stats(ts, prefix):
     out = {}
 
     if not isinstance(ts, dict) or not ts:
-        # riempiamo comunque chiavi importanti a vuoto
         base_keys = [
             "form",
             "fixtures_played_home", "fixtures_played_away",
@@ -492,7 +490,7 @@ def generate_picks(rows):
                 max(tot_games, 1)
             )
 
-            # ===== MODELLO: O1.5_SAFE =====
+            # O1.5_SAFE
             if o_o15 and MIN_ODD <= o_o15 <= 1.60 and exp_goals >= 1.9 and over15_rate >= 0.7:
                 p_imp = implied_prob(o_o15) or 0
                 prob_model = min(97, over15_rate * 100 + max(0, exp_goals - 2) * 10)
@@ -511,10 +509,10 @@ def generate_picks(rows):
                     "score": score,
                 })
 
-            # ===== MODELLO: BTTS_YES_STRONG =====
+            # BTTS_YES_STRONG
             if o_btts_y and 1.30 <= o_btts_y <= 1.90 and gh >= 0.9 and ga >= 0.9:
                 p_imp_btts = implied_prob(o_btts_y) or 0
-                prob_model = min(95, (gh + ga) * 30)  # stima grezza
+                prob_model = min(95, (gh + ga) * 30)
                 value = (prob_model - p_imp_btts) / 100.0
                 score = value + max(0, gh - 0.9) + max(0, ga - 0.9)
                 picks.append({
@@ -529,7 +527,7 @@ def generate_picks(rows):
                     "score": score,
                 })
 
-            # ===== MODELLO: BTTS_NO_STRONG =====
+            # BTTS_NO_STRONG
             if o_btts_n and 1.30 <= o_btts_n <= 1.90 and exp_goals <= 2.2:
                 p_imp_bttsn = implied_prob(o_btts_n) or 0
                 prob_model = max(40, 100 - exp_goals * 25)
@@ -547,7 +545,7 @@ def generate_picks(rows):
                     "score": score,
                 })
 
-            # ===== MODELLO: HOME_WIN_STRONG =====
+            # HOME_WIN_STRONG
             if oh and 1.30 <= oh <= 1.90 and prob_home:
                 p_imp_h = implied_prob(oh) or 0
                 if prob_home - p_imp_h >= 5 and prob_home >= 55:
@@ -565,14 +563,13 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # ===== MODELLO: DC1X_SAFE =====
+            # DC1X_SAFE
             if oh and MIN_ODD <= oh <= 1.80 and prob_home and prob_draw:
                 prob1x = prob_home + prob_draw
                 if prob1x >= 75:
                     p_imp1 = implied_prob(oh) or 0
                     value = (prob1x - p_imp1) / 100.0
                     score = value + (prob1x - 75) / 100.0
-                    # quota stimata 1X ≈ 0.65 * quota 1
                     q1x = max(1.25, min(1.60, oh * 0.65))
                     picks.append({
                         "model": "DC1X_SAFE",
@@ -586,7 +583,7 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # ===== MODELLO: DCX2_SAFE =====
+            # DCX2_SAFE
             if oa and MIN_ODD <= oa <= 1.90 and prob_away and prob_draw:
                 probx2 = prob_away + prob_draw
                 if probx2 >= 75:
@@ -606,7 +603,7 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # ===== MODELLO: O2.5_STRONG =====
+            # O2.5_STRONG
             if o_o25 and 1.45 <= o_o25 <= 2.10 and exp_goals >= 2.6:
                 p_imp25 = implied_prob(o_o25) or 0
                 prob_model = min(96, exp_goals * 30)
@@ -628,7 +625,6 @@ def generate_picks(rows):
             print("# ERR PICK", e, file=sys.stderr)
             continue
 
-    # ranking globale
     picks.sort(key=lambda x: x["score"], reverse=True)
     return picks
 
@@ -644,22 +640,17 @@ def build_categories(picks):
         "DAILY_10PLUS": [],
     }
 
-    # best global
     cats["TOP_5_TIPS"] = picks[:5]
     cats["BEST_TIPS_OF_DAY"] = picks[:15]
 
-    # safe picks (quota 1.20-1.50)
     safe = [p for p in picks if p["category"] == "SAFE_PICKS" and 1.20 <= (p["odd"] or 0) <= 1.55]
     cats["SAFE_PICKS"] = safe[:10]
 
-    # over/under tips
     ou = [p for p in picks if p["model"].startswith("O") or p["model"].startswith("U") or "BTTS" in p["model"]]
     cats["OVER_UNDER_TIPS"] = ou[:15]
 
-    # single game = miglior pick assoluto
     cats["SINGLE_GAME"] = picks[:1]
 
-    # daily 2+ odds: prendi 2–3 safe picks finché quota totale ~2–3
     ticket = []
     prod = 1.0
     for p in safe:
@@ -670,7 +661,6 @@ def build_categories(picks):
             break
     cats["DAILY_2PLUS"] = ticket
 
-    # daily 10+ odds: prendi picks solide con odd 1.30–1.80 finché quota totale ~10
     ticket10 = []
     prod10 = 1.0
     for p in picks:
@@ -689,7 +679,6 @@ def build_categories(picks):
 # ==========================
 
 def sheetdb_clear_sheet(sheet_name):
-    # con SheetDB tipicamente fai DELETE con param ?sheet=Nome
     try:
         url = f"{SHEETDB_URL}?sheet={urllib.parse.quote(sheet_name)}"
         requests.delete(url, timeout=20)
@@ -709,11 +698,9 @@ def sheetdb_append_rows(sheet_name, rows):
 
 
 def push_raw_and_picks_to_sheetdb(rows, categories):
-    # RAW
     sheetdb_clear_sheet("RAW")
     sheetdb_append_rows("RAW", rows)
 
-    # PICKS: una riga per pick con categoria
     out = []
     for cat_name, plist in categories.items():
         for p in plist:
@@ -768,20 +755,55 @@ def run_pipeline():
 
 
 # ==========================
+# PIPELINE ASINCRONA
+# ==========================
+
+pipeline_running = False
+pipeline_lock = threading.Lock()
+
+def start_pipeline_async():
+    global pipeline_running
+
+    if already_ran_for_today():
+        return False
+
+    with pipeline_lock:
+        if pipeline_running:
+            return False
+        pipeline_running = True
+
+    def _worker():
+        global pipeline_running
+        try:
+            run_pipeline()
+            set_run_marker()
+        finally:
+            with pipeline_lock:
+                pipeline_running = False
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return True
+
+
+# ==========================
 # HTTP SERVER PER RENDER
 # ==========================
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+
         if parsed.path == "/run":
-            # lancia pipeline se non già fatta oggi
-            if not already_ran_for_today():
-                rows, picks, cats = run_pipeline()
-                set_run_marker()
-                text = f"OK pipeline eseguita. rows={len(rows)} picks={len(picks)}"
+            started = start_pipeline_async()
+            if started:
+                text = "Pipeline avviata in background"
             else:
-                text = "Già eseguito oggi"
+                if already_ran_for_today():
+                    text = "Già eseguito oggi"
+                else:
+                    text = "Pipeline già in esecuzione"
+
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -793,11 +815,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"OK\n")
 
     def log_message(self, format, *args):
-        # meno rumore nei log
         pass
+
 
 class ReuseTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
+
 
 def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
@@ -808,4 +831,3 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
-
