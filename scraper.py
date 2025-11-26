@@ -1,62 +1,89 @@
-import requests
-import sys
 import os
+import sys
+import time
+import json
+import math
 import http.server
 import socketserver
-import time
+import urllib.parse
+from datetime import datetime, timezone
 
-# =========================================================
-# CONFIGURAZIONE
-# =========================================================
+import requests
+
+# ==========================
+# CONFIG
+# ==========================
 
 API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
 BASE_URL = "https://v3.football.api-sports.io"
-
 HEADERS = {
     "x-apisports-key": API_KEY,
     "Accept": "application/json",
 }
 
-# Data target (per ora fissa, poi la puoi rendere dinamica)
-TARGET_DATE = "2025-11-26"
+# Render user must set this env to the SheetDB endpoint
+SHEETDB_URL = os.environ.get("SHEETDB_URL", "https://sheetdb.io/api/v1/ou6vl5uzwgsda")
 
-# Marker per evitare doppia esecuzione sulla stessa istanza
+# timezone per la data di oggi
+TZ = timezone.utc  # puoi cambiarla se vuoi
+
 RUN_MARKER_PATH = "/tmp/last_run_marker.txt"
-
-# Cache per le statistiche di squadra (league, season, team)
 TEAM_STATS_CACHE = {}
 
 
-# =========================================================
-# FUNZIONI DI BASE
-# =========================================================
+# ==========================
+# UTILS
+# ==========================
 
-def api_get(path, params=None, timeout=15):
-    """Wrapper semplice: torna solo 'response' (lista) per gli endpoint standard."""
+def today_str():
+    return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
+def api_get(path, params=None, timeout=20):
     url = f"{BASE_URL}{path}"
     r = requests.get(url, headers=HEADERS, params=params or {}, timeout=timeout)
     r.raise_for_status()
-    return r.json().get("response", [])
+    data = r.json()
+    return data.get("response", [])
 
+
+def to_float(x):
+    try:
+        return float(str(x).replace(",", "."))
+    except:
+        return None
+
+
+def implied_prob(odd):
+    if odd is None or odd <= 1:
+        return None
+    return 100.0 / odd
+
+
+def safe_div(a, b):
+    try:
+        return a / b if b not in (0, None) and a is not None else 0.0
+    except ZeroDivisionError:
+        return 0.0
+
+
+# ==========================
+# SCRAPING FIXTURES + DATA
+# ==========================
 
 def get_fixtures_for_date(target_date):
-    """Tutti i fixtures del giorno, nessun filtro su leghe/zone."""
     r = requests.get(
         f"{BASE_URL}/fixtures",
         headers=HEADERS,
         params={"date": target_date, "timezone": "Europe/Dublin"},
-        timeout=20,
+        timeout=30,
     )
     r.raise_for_status()
     data = r.json()
     resp = data.get("response", [])
-    print(f"# Partite totali trovate per {target_date}: {len(resp)}", file=sys.stderr)
+    print(f"# Fixtures trovati per {target_date}: {len(resp)}", file=sys.stderr)
     return resp
 
-
-# =========================================================
-# PREDICTIONS
-# =========================================================
 
 def get_prediction_for_fixture(fixture_id):
     preds = api_get("/predictions", {"fixture": fixture_id})
@@ -78,10 +105,6 @@ def get_prediction_for_fixture(fixture_id):
         "prob_away": (b.get("percent") or {}).get("away"),
     }
 
-
-# =========================================================
-# ODDS (1X2, O/U, BTTS)
-# =========================================================
 
 PREFERRED_BOOKMAKER_NAMES = {"Bet365", "bet365", "bet365.com", "Bet 365"}
 
@@ -140,7 +163,6 @@ def extract_btts(bets):
 
 
 def get_odds_for_fixture(fixture_id):
-    """Odds per fixture: Bet365 prioritario per 1X2 e O/U, BTTS anche da altri book."""
     data = api_get("/odds", {"fixture": fixture_id})
     if not data:
         return {}
@@ -149,7 +171,6 @@ def get_odds_for_fixture(fixture_id):
     if not bookmakers:
         return {}
 
-    # bookmaker principale (Bet365 se c'è)
     chosen = None
     for b in bookmakers:
         if b.get("name") in PREFERRED_BOOKMAKER_NAMES:
@@ -164,14 +185,10 @@ def get_odds_for_fixture(fixture_id):
     res.update(extract_match_winner(bets_main))
     res.update(extract_over_under(bets_main))
 
-    # BTTS: prima proviamo sul principale
     btts = extract_btts(bets_main)
-
-    # Se il principale non ce l'ha, cerchiamo negli altri bookmaker (stessa chiamata)
     if not btts["odd_btts_yes"] and not btts["odd_btts_no"]:
         for b in bookmakers:
-            bets_b = b.get("bets", [])
-            alt = extract_btts(bets_b)
+            alt = extract_btts(b.get("bets", []))
             if alt["odd_btts_yes"] or alt["odd_btts_no"]:
                 btts = alt
                 break
@@ -180,17 +197,8 @@ def get_odds_for_fixture(fixture_id):
     return res
 
 
-# =========================================================
-# STATISTICHE FIXTURE (CORNERS, CARDS) - /fixtures/statistics
-# =========================================================
-
 def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
-    """
-    /fixtures/statistics?fixture={fixture_id}
-    Estrae corners e gialli/rossi per team home/away.
-    """
-    stats_list = api_get("/fixtures/statistics", {"fixture": fixture_id}, timeout=20)
-
+    stats_list = api_get("/fixtures/statistics", {"fixture": fixture_id}, timeout=30)
     result = {
         "corners_home": "",
         "corners_away": "",
@@ -199,7 +207,6 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
         "red_cards_home": "",
         "red_cards_away": "",
     }
-
     per_team = {}
 
     for entry in stats_list:
@@ -207,7 +214,6 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
         team_id = team.get("id")
         if team_id is None:
             continue
-
         stat_map = {}
         for s in entry.get("statistics", []):
             stype = s.get("type")
@@ -215,7 +221,7 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
             stat_map[stype] = value
         per_team[team_id] = stat_map
 
-    def fill_for_team(team_id, side_prefix):
+    def fill(team_id, side_prefix):
         stat_map = per_team.get(team_id) or {}
         corners = stat_map.get("Corner Kicks")
         if corners is None:
@@ -223,27 +229,18 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
         yellow = stat_map.get("Yellow Cards")
         red = stat_map.get("Red Cards")
 
-        result[f"corners_{side_prefix}"] = corners if corners is not None else ""
-        result[f"yellow_cards_{side_prefix}"] = yellow if yellow is not None else ""
-        result[f"red_cards_{side_prefix}"] = red if red is not None else ""
+        result[f"corners_{side_prefix}"] = corners or ""
+        result[f"yellow_cards_{side_prefix}"] = yellow or ""
+        result[f"red_cards_{side_prefix}"] = red or ""
 
-    if home_team_id is not None:
-        fill_for_team(home_team_id, "home")
-    if away_team_id is not None:
-        fill_for_team(away_team_id, "away")
-
+    if home_team_id:
+        fill(home_team_id, "home")
+    if away_team_id:
+        fill(away_team_id, "away")
     return result
 
 
-# =========================================================
-# TEAM STATISTICS - /teams/statistics (per squadra, league, season)
-# =========================================================
-
 def get_team_statistics_raw(league_id, season, team_id):
-    """
-    Ritorna il 'response' grezzo di /teams/statistics (dict).
-    Usa cache per non ripetere le chiamate.
-    """
     if not league_id or not season or not team_id:
         return {}
 
@@ -254,32 +251,24 @@ def get_team_statistics_raw(league_id, season, team_id):
     url = f"{BASE_URL}/teams/statistics"
     params = {"league": league_id, "season": season, "team": team_id}
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
         ts = data.get("response") or {}
     except Exception as e:
-        print(f"# ERRORE /teams/statistics league={league_id} season={season} team={team_id}: {e}", file=sys.stderr)
+        print(f"# ERRORE /teams/statistics {key}: {e}", file=sys.stderr)
         ts = {}
-
     TEAM_STATS_CACHE[key] = ts
-
-    # piccolo throttling per non bombardare l'API
-    time.sleep(0.2)
-
+    time.sleep(0.2)  # throttling base
     return ts
 
 
 def flatten_team_stats(ts, prefix):
-    """
-    'ts' è il dict 'response' di /teams/statistics.
-    Ritorna un dict con chiavi prefissate (home_/away_).
-    """
     out = {}
 
     if not isinstance(ts, dict) or not ts:
-        # riempiamo con vuoti, tanto poi .get(..., "") in main copre i None
-        keys = [
+        # riempiamo comunque chiavi importanti a vuoto
+        base_keys = [
             "form",
             "fixtures_played_home", "fixtures_played_away",
             "fixtures_wins_home", "fixtures_wins_away",
@@ -293,31 +282,26 @@ def flatten_team_stats(ts, prefix):
             "failed_to_score_home", "failed_to_score_away",
             "streak_wins", "streak_draws", "streak_loses",
         ]
-        for k in keys:
+        for k in base_keys:
             out[prefix + k] = ""
-        # OU keys dinamiche, li definiamo dopo comunque
     else:
         form = ts.get("form")
-
         fixtures = ts.get("fixtures") or {}
         played = fixtures.get("played") or {}
         wins = fixtures.get("wins") or {}
         draws = fixtures.get("draws") or {}
         loses = fixtures.get("loses") or {}
-
         goals = ts.get("goals") or {}
         g_for_total = (goals.get("for") or {}).get("total") or {}
         g_against_total = (goals.get("against") or {}).get("total") or {}
         g_for_avg = (goals.get("for") or {}).get("average") or {}
         g_against_avg = (goals.get("against") or {}).get("average") or {}
-
         clean_sheet = ts.get("clean_sheet") or {}
         failed_to_score = ts.get("failed_to_score") or {}
         biggest = ts.get("biggest") or {}
         streak = biggest.get("streak") or {}
 
         out[prefix + "form"] = form or ""
-
         out[prefix + "fixtures_played_home"] = played.get("home", "")
         out[prefix + "fixtures_played_away"] = played.get("away", "")
         out[prefix + "fixtures_wins_home"] = wins.get("home", "")
@@ -331,7 +315,6 @@ def flatten_team_stats(ts, prefix):
         out[prefix + "goals_for_total_away"] = g_for_total.get("away", "")
         out[prefix + "goals_against_total_home"] = g_against_total.get("home", "")
         out[prefix + "goals_against_total_away"] = g_against_total.get("away", "")
-
         out[prefix + "goals_for_avg_home"] = g_for_avg.get("home", "")
         out[prefix + "goals_for_avg_away"] = g_for_avg.get("away", "")
         out[prefix + "goals_against_avg_home"] = g_against_avg.get("home", "")
@@ -341,12 +324,10 @@ def flatten_team_stats(ts, prefix):
         out[prefix + "clean_sheet_away"] = clean_sheet.get("away", "")
         out[prefix + "failed_to_score_home"] = failed_to_score.get("home", "")
         out[prefix + "failed_to_score_away"] = failed_to_score.get("away", "")
-
         out[prefix + "streak_wins"] = streak.get("wins", "")
         out[prefix + "streak_draws"] = streak.get("draws", "")
         out[prefix + "streak_loses"] = streak.get("loses", "")
 
-        # Under/Over per for/against alle soglie 0.5, 1.5, 2.5, 3.5
         gf_uo = (goals.get("for") or {}).get("under_over") or {}
         ga_uo = (goals.get("against") or {}).get("under_over") or {}
 
@@ -358,80 +339,23 @@ def flatten_team_stats(ts, prefix):
             label = str(line).replace(".", "_")
             over_for, under_for = get_ou(gf_uo, line)
             over_against, under_against = get_ou(ga_uo, line)
-
             out[f"{prefix}ou_{label}_for_over"] = over_for
             out[f"{prefix}ou_{label}_for_under"] = under_for
             out[f"{prefix}ou_{label}_against_over"] = over_against
             out[f"{prefix}ou_{label}_against_under"] = under_against
 
-    # Se per qualche motivo mancano alcune chiavi OU, le assicuriamo vuote
     for line in [0.5, 1.5, 2.5, 3.5]:
         label = str(line).replace(".", "_")
         for part in ["for_over", "for_under", "against_over", "against_under"]:
             key = f"{prefix}ou_{label}_{part}"
             if key not in out:
                 out[key] = ""
-
     return out
 
 
-# =========================================================
-# CSV
-# =========================================================
-
-def sanitize(v):
-    return "" if v is None else str(v).replace(";", ",")
-
-
-def main():
-    fixtures = get_fixtures_for_date(TARGET_DATE)
-
-    csv_rows = []
-    header = (
-        "fixture_id;date;time;league_id;league_name;country;season;round;"
-        "status_short;status_long;venue_name;venue_city;referee_name;"
-        "home_team;away_team;corners_home;corners_away;"
-        "yellow_cards_home;yellow_cards_away;red_cards_home;red_cards_away;"
-        "prediction_winner_name;prediction_winner_comment;prediction_win_or_draw;"
-        "prediction_under_over;prediction_advice;prediction_goals_home;prediction_goals_away;"
-        "prob_home;prob_draw;prob_away;bookmaker;odd_home;odd_draw;odd_away;"
-        "odd_ou_1_5_over;odd_ou_2_5_over;odd_ou_2_5_under;odd_ou_3_5_over;odd_btts_yes;odd_btts_no;"
-        # TEAM STATS HOME
-        "home_form;"
-        "home_fixtures_played_home;home_fixtures_played_away;"
-        "home_fixtures_wins_home;home_fixtures_wins_away;"
-        "home_fixtures_draws_home;home_fixtures_draws_away;"
-        "home_fixtures_loses_home;home_fixtures_loses_away;"
-        "home_goals_for_total_home;home_goals_for_total_away;"
-        "home_goals_against_total_home;home_goals_against_total_away;"
-        "home_goals_for_avg_home;home_goals_for_avg_away;"
-        "home_goals_against_avg_home;home_goals_against_avg_away;"
-        "home_clean_sheet_home;home_clean_sheet_away;"
-        "home_failed_to_score_home;home_failed_to_score_away;"
-        "home_streak_wins;home_streak_draws;home_streak_loses;"
-        "home_ou_0_5_for_over;home_ou_0_5_for_under;home_ou_0_5_against_over;home_ou_0_5_against_under;"
-        "home_ou_1_5_for_over;home_ou_1_5_for_under;home_ou_1_5_against_over;home_ou_1_5_against_under;"
-        "home_ou_2_5_for_over;home_ou_2_5_for_under;home_ou_2_5_against_over;home_ou_2_5_against_under;"
-        "home_ou_3_5_for_over;home_ou_3_5_for_under;home_ou_3_5_against_over;home_ou_3_5_against_under;"
-        # TEAM STATS AWAY
-        "away_form;"
-        "away_fixtures_played_home;away_fixtures_played_away;"
-        "away_fixtures_wins_home;away_fixtures_wins_away;"
-        "away_fixtures_draws_home;away_fixtures_draws_away;"
-        "away_fixtures_loses_home;away_fixtures_loses_away;"
-        "away_goals_for_total_home;away_goals_for_total_away;"
-        "away_goals_against_total_home;away_goals_against_total_away;"
-        "away_goals_for_avg_home;away_goals_for_avg_away;"
-        "away_goals_against_avg_home;away_goals_against_avg_away;"
-        "away_clean_sheet_home;away_clean_sheet_away;"
-        "away_failed_to_score_home;away_failed_to_score_away;"
-        "away_streak_wins;away_streak_draws;away_streak_loses;"
-        "away_ou_0_5_for_over;away_ou_0_5_for_under;away_ou_0_5_against_over;away_ou_0_5_against_under;"
-        "away_ou_1_5_for_over;away_ou_1_5_for_under;away_ou_1_5_against_over;away_ou_1_5_against_under;"
-        "away_ou_2_5_for_over;away_ou_2_5_for_under;away_ou_2_5_against_over;away_ou_2_5_against_under;"
-        "away_ou_3_5_for_over;away_ou_3_5_for_under;away_ou_3_5_against_over;away_ou_3_5_against_under"
-    )
-    csv_rows.append(header)
+def build_rows_for_date(target_date):
+    fixtures = get_fixtures_for_date(target_date)
+    rows = []
 
     for f in fixtures:
         fixture_id = ""
@@ -439,14 +363,14 @@ def main():
             fx = f.get("fixture", {})
             league = f.get("league", {})
             teams = f.get("teams", {})
-            fixture_id = fx.get("id", "")
 
+            fixture_id = fx.get("id", "")
             dateiso = fx.get("date", "")
             d = dateiso[:10] if len(dateiso) >= 10 else ""
             t = dateiso[11:16] if len(dateiso) >= 16 else ""
-
             status = fx.get("status", {}) or {}
             venue = fx.get("venue", {}) or {}
+
             referee_name = fx.get("referee", "")
 
             home_team = teams.get("home", {}) or {}
@@ -457,167 +381,367 @@ def main():
             league_id = league.get("id")
             season = league.get("season")
 
-            # Predictions
             pred = get_prediction_for_fixture(fixture_id)
-
-            # Odds
             odds = get_odds_for_fixture(fixture_id)
-
-            # Statistiche match (corners + cards)
             stats = get_statistics_for_fixture(fixture_id, home_team_id, away_team_id)
 
-            # Team statistics home/away (con cache + throttling)
             home_ts_raw = get_team_statistics_raw(league_id, season, home_team_id)
             away_ts_raw = get_team_statistics_raw(league_id, season, away_team_id)
-
             home_ts = flatten_team_stats(home_ts_raw, "home_")
             away_ts = flatten_team_stats(away_ts_raw, "away_")
 
-            row = [
-                fixture_id,
-                d,
-                t,
-                league.get("id", ""),
-                league.get("name", ""),
-                league.get("country", ""),
-                league.get("season", ""),
-                league.get("round", ""),
-                status.get("short", ""),
-                status.get("long", ""),
-                venue.get("name", ""),
-                venue.get("city", ""),
-                referee_name,
-                home_team.get("name", ""),
-                away_team.get("name", ""),
-                stats.get("corners_home", ""),
-                stats.get("corners_away", ""),
-                stats.get("yellow_cards_home", ""),
-                stats.get("yellow_cards_away", ""),
-                stats.get("red_cards_home", ""),
-                stats.get("red_cards_away", ""),
-                pred.get("pred_winner_name", ""),
-                pred.get("pred_winner_comment", ""),
-                pred.get("win_or_draw", ""),
-                pred.get("under_over", ""),
-                pred.get("advice", ""),
-                pred.get("goals_home", ""),
-                pred.get("goals_away", ""),
-                pred.get("prob_home", ""),
-                pred.get("prob_draw", ""),
-                pred.get("prob_away", ""),
-                odds.get("bookmaker", ""),
-                odds.get("odd_home", ""),
-                odds.get("odd_draw", ""),
-                odds.get("odd_away", ""),
-                odds.get("odd_ou_1_5_over", ""),
-                odds.get("odd_ou_2_5_over", ""),
-                odds.get("odd_ou_2_5_under", ""),
-                odds.get("odd_ou_3_5_over", ""),
-                odds.get("odd_btts_yes", ""),
-                odds.get("odd_btts_no", ""),
-                # HOME TEAM STATS
-                home_ts.get("home_form", ""),
-                home_ts.get("home_fixtures_played_home", ""),
-                home_ts.get("home_fixtures_played_away", ""),
-                home_ts.get("home_fixtures_wins_home", ""),
-                home_ts.get("home_fixtures_wins_away", ""),
-                home_ts.get("home_fixtures_draws_home", ""),
-                home_ts.get("home_fixtures_draws_away", ""),
-                home_ts.get("home_fixtures_loses_home", ""),
-                home_ts.get("home_fixtures_loses_away", ""),
-                home_ts.get("home_goals_for_total_home", ""),
-                home_ts.get("home_goals_for_total_away", ""),
-                home_ts.get("home_goals_against_total_home", ""),
-                home_ts.get("home_goals_against_total_away", ""),
-                home_ts.get("home_goals_for_avg_home", ""),
-                home_ts.get("home_goals_for_avg_away", ""),
-                home_ts.get("home_goals_against_avg_home", ""),
-                home_ts.get("home_goals_against_avg_away", ""),
-                home_ts.get("home_clean_sheet_home", ""),
-                home_ts.get("home_clean_sheet_away", ""),
-                home_ts.get("home_failed_to_score_home", ""),
-                home_ts.get("home_failed_to_score_away", ""),
-                home_ts.get("home_streak_wins", ""),
-                home_ts.get("home_streak_draws", ""),
-                home_ts.get("home_streak_loses", ""),
-                home_ts.get("home_ou_0_5_for_over", ""),
-                home_ts.get("home_ou_0_5_for_under", ""),
-                home_ts.get("home_ou_0_5_against_over", ""),
-                home_ts.get("home_ou_0_5_against_under", ""),
-                home_ts.get("home_ou_1_5_for_over", ""),
-                home_ts.get("home_ou_1_5_for_under", ""),
-                home_ts.get("home_ou_1_5_against_over", ""),
-                home_ts.get("home_ou_1_5_against_under", ""),
-                home_ts.get("home_ou_2_5_for_over", ""),
-                home_ts.get("home_ou_2_5_for_under", ""),
-                home_ts.get("home_ou_2_5_against_over", ""),
-                home_ts.get("home_ou_2_5_against_under", ""),
-                home_ts.get("home_ou_3_5_for_over", ""),
-                home_ts.get("home_ou_3_5_for_under", ""),
-                home_ts.get("home_ou_3_5_against_over", ""),
-                home_ts.get("home_ou_3_5_against_under", ""),
-                # AWAY TEAM STATS
-                away_ts.get("away_form", ""),
-                away_ts.get("away_fixtures_played_home", ""),
-                away_ts.get("away_fixtures_played_away", ""),
-                away_ts.get("away_fixtures_wins_home", ""),
-                away_ts.get("away_fixtures_wins_away", ""),
-                away_ts.get("away_fixtures_draws_home", ""),
-                away_ts.get("away_fixtures_draws_away", ""),
-                away_ts.get("away_fixtures_loses_home", ""),
-                away_ts.get("away_fixtures_loses_away", ""),
-                away_ts.get("away_goals_for_total_home", ""),
-                away_ts.get("away_goals_for_total_away", ""),
-                away_ts.get("away_goals_against_total_home", ""),
-                away_ts.get("away_goals_against_total_away", ""),
-                away_ts.get("away_goals_for_avg_home", ""),
-                away_ts.get("away_goals_for_avg_away", ""),
-                away_ts.get("away_goals_against_avg_home", ""),
-                away_ts.get("away_goals_against_avg_away", ""),
-                away_ts.get("away_clean_sheet_home", ""),
-                away_ts.get("away_clean_sheet_away", ""),
-                away_ts.get("away_failed_to_score_home", ""),
-                away_ts.get("away_failed_to_score_away", ""),
-                away_ts.get("away_streak_wins", ""),
-                away_ts.get("away_streak_draws", ""),
-                away_ts.get("away_streak_loses", ""),
-                away_ts.get("away_ou_0_5_for_over", ""),
-                away_ts.get("away_ou_0_5_for_under", ""),
-                away_ts.get("away_ou_0_5_against_over", ""),
-                away_ts.get("away_ou_0_5_against_under", ""),
-                away_ts.get("away_ou_1_5_for_over", ""),
-                away_ts.get("away_ou_1_5_for_under", ""),
-                away_ts.get("away_ou_1_5_against_over", ""),
-                away_ts.get("away_ou_1_5_against_under", ""),
-                away_ts.get("away_ou_2_5_for_over", ""),
-                away_ts.get("away_ou_2_5_for_under", ""),
-                away_ts.get("away_ou_2_5_against_over", ""),
-                away_ts.get("away_ou_2_5_against_under", ""),
-                away_ts.get("away_ou_3_5_for_over", ""),
-                away_ts.get("away_ou_3_5_for_under", ""),
-                away_ts.get("away_ou_3_5_against_over", ""),
-                away_ts.get("away_ou_3_5_against_under", ""),
-            ]
+            row = {
+                "fixture_id": fixture_id,
+                "date": d,
+                "time": t,
+                "league_id": league.get("id", ""),
+                "league_name": league.get("name", ""),
+                "country": league.get("country", ""),
+                "season": league.get("season", ""),
+                "round": league.get("round", ""),
+                "status_short": status.get("short", ""),
+                "status_long": status.get("long", ""),
+                "venue_name": venue.get("name", ""),
+                "venue_city": venue.get("city", ""),
+                "referee_name": referee_name,
+                "home_team": home_team.get("name", ""),
+                "away_team": away_team.get("name", ""),
+                "corners_home": stats.get("corners_home", ""),
+                "corners_away": stats.get("corners_away", ""),
+                "yellow_cards_home": stats.get("yellow_cards_home", ""),
+                "yellow_cards_away": stats.get("yellow_cards_away", ""),
+                "red_cards_home": stats.get("red_cards_home", ""),
+                "red_cards_away": stats.get("red_cards_away", ""),
+                "prediction_winner_name": pred.get("pred_winner_name", ""),
+                "prediction_winner_comment": pred.get("pred_winner_comment", ""),
+                "prediction_win_or_draw": pred.get("win_or_draw", ""),
+                "prediction_under_over": pred.get("under_over", ""),
+                "prediction_advice": pred.get("advice", ""),
+                "prediction_goals_home": pred.get("goals_home", ""),
+                "prediction_goals_away": pred.get("goals_away", ""),
+                "prob_home": pred.get("prob_home", ""),
+                "prob_draw": pred.get("prob_draw", ""),
+                "prob_away": pred.get("prob_away", ""),
+                "bookmaker": odds.get("bookmaker", ""),
+                "odd_home": odds.get("odd_home", ""),
+                "odd_draw": odds.get("odd_draw", ""),
+                "odd_away": odds.get("odd_away", ""),
+                "odd_ou_1_5_over": odds.get("odd_ou_1_5_over", ""),
+                "odd_ou_2_5_over": odds.get("odd_ou_2_5_over", ""),
+                "odd_ou_2_5_under": odds.get("odd_ou_2_5_under", ""),
+                "odd_ou_3_5_over": odds.get("odd_ou_3_5_over", ""),
+                "odd_btts_yes": odds.get("odd_btts_yes", ""),
+                "odd_btts_no": odds.get("odd_btts_no", ""),
+            }
+            row.update(home_ts)
+            row.update(away_ts)
 
-            csv_rows.append(";".join(sanitize(v) for v in row))
+            rows.append(row)
 
         except Exception as e:
             print(f"# ERRORE fixture {fixture_id}: {e}", file=sys.stderr)
             continue
 
-    print("### CSV_INIZIO ###")
-    print("\n".join(csv_rows))
-    print("### CSV_FINE ###")
+    return rows
 
 
-# =========================================================
-# MARCATORE & MINI WEB SERVER PER RENDER
-# =========================================================
+# ==========================
+# MODELLI & PICKS
+# ==========================
 
-def already_ran_for_target_date():
+def generate_picks(rows):
+    picks = []
+    MIN_ODD = 1.20
+
+    for r in rows:
+        try:
+            fixture_id = r["fixture_id"]
+            league = r["league_name"]
+            home = r["home_team"]
+            away = r["away_team"]
+
+            prob_home = to_float(r["prob_home"])
+            prob_draw = to_float(r["prob_draw"])
+            prob_away = to_float(r["prob_away"])
+
+            gh = to_float(r["prediction_goals_home"]) or 0
+            ga = to_float(r["prediction_goals_away"]) or 0
+            exp_goals = gh + ga
+
+            oh = to_float(r["odd_home"])
+            od = to_float(r["odd_draw"])
+            oa = to_float(r["odd_away"])
+            o_o15 = to_float(r["odd_ou_1_5_over"])
+            o_o25 = to_float(r["odd_ou_2_5_over"])
+            o_u25 = to_float(r["odd_ou_2_5_under"])
+            o_o35 = to_float(r["odd_ou_3_5_over"])
+            o_btts_y = to_float(r["odd_btts_yes"])
+            o_btts_n = to_float(r["odd_btts_no"])
+
+            home_over15_for = to_float(r["home_ou_1_5_for_over"]) or 0
+            home_over15_against = to_float(r["home_ou_1_5_against_over"]) or 0
+            away_over15_for = to_float(r["away_ou_1_5_for_over"]) or 0
+            away_over15_against = to_float(r["away_ou_1_5_against_over"]) or 0
+
+            home_games = (to_float(r["home_fixtures_played_home"]) or 0) + (to_float(r["home_fixtures_played_away"]) or 0)
+            away_games = (to_float(r["away_fixtures_played_home"]) or 0) + (to_float(r["away_fixtures_played_away"]) or 0)
+            tot_games = home_games + away_games if home_games and away_games else max(home_games, away_games)
+
+            over15_rate = safe_div(
+                home_over15_for + home_over15_against + away_over15_for + away_over15_against,
+                max(tot_games, 1)
+            )
+
+            # ===== MODELLO: O1.5_SAFE =====
+            if o_o15 and MIN_ODD <= o_o15 <= 1.60 and exp_goals >= 1.9 and over15_rate >= 0.7:
+                p_imp = implied_prob(o_o15) or 0
+                prob_model = min(97, over15_rate * 100 + max(0, exp_goals - 2) * 10)
+                value = (prob_model - p_imp) / 100.0
+                score = value + (over15_rate - 0.7) + max(0, exp_goals - 1.9)
+
+                picks.append({
+                    "model": "O1_5_SAFE",
+                    "category": "OVER_UNDER_TIPS",
+                    "fixture_id": fixture_id,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "pick": "Over 1.5 goals",
+                    "odd": o_o15,
+                    "score": score,
+                })
+
+            # ===== MODELLO: BTTS_YES_STRONG =====
+            if o_btts_y and 1.30 <= o_btts_y <= 1.90 and gh >= 0.9 and ga >= 0.9:
+                p_imp_btts = implied_prob(o_btts_y) or 0
+                prob_model = min(95, (gh + ga) * 30)  # stima grezza
+                value = (prob_model - p_imp_btts) / 100.0
+                score = value + max(0, gh - 0.9) + max(0, ga - 0.9)
+                picks.append({
+                    "model": "BTTS_YES_STRONG",
+                    "category": "OVER_UNDER_TIPS",
+                    "fixture_id": fixture_id,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "pick": "Both teams score YES",
+                    "odd": o_btts_y,
+                    "score": score,
+                })
+
+            # ===== MODELLO: BTTS_NO_STRONG =====
+            if o_btts_n and 1.30 <= o_btts_n <= 1.90 and exp_goals <= 2.2:
+                p_imp_bttsn = implied_prob(o_btts_n) or 0
+                prob_model = max(40, 100 - exp_goals * 25)
+                value = (prob_model - p_imp_bttsn) / 100.0
+                score = value + max(0, 2.2 - exp_goals)
+                picks.append({
+                    "model": "BTTS_NO_STRONG",
+                    "category": "OVER_UNDER_TIPS",
+                    "fixture_id": fixture_id,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "pick": "Both teams score NO",
+                    "odd": o_btts_n,
+                    "score": score,
+                })
+
+            # ===== MODELLO: HOME_WIN_STRONG =====
+            if oh and 1.30 <= oh <= 1.90 and prob_home:
+                p_imp_h = implied_prob(oh) or 0
+                if prob_home - p_imp_h >= 5 and prob_home >= 55:
+                    value = (prob_home - p_imp_h) / 100.0
+                    score = value + (prob_home - 55) / 100.0
+                    picks.append({
+                        "model": "HOME_WIN_STRONG",
+                        "category": "BEST_TIPS_OF_DAY",
+                        "fixture_id": fixture_id,
+                        "league": league,
+                        "home": home,
+                        "away": away,
+                        "pick": "Home wins",
+                        "odd": oh,
+                        "score": score,
+                    })
+
+            # ===== MODELLO: DC1X_SAFE =====
+            if oh and MIN_ODD <= oh <= 1.80 and prob_home and prob_draw:
+                prob1x = prob_home + prob_draw
+                if prob1x >= 75:
+                    p_imp1 = implied_prob(oh) or 0
+                    value = (prob1x - p_imp1) / 100.0
+                    score = value + (prob1x - 75) / 100.0
+                    # quota stimata 1X ≈ 0.65 * quota 1
+                    q1x = max(1.25, min(1.60, oh * 0.65))
+                    picks.append({
+                        "model": "DC1X_SAFE",
+                        "category": "SAFE_PICKS",
+                        "fixture_id": fixture_id,
+                        "league": league,
+                        "home": home,
+                        "away": away,
+                        "pick": "1X",
+                        "odd": q1x,
+                        "score": score,
+                    })
+
+            # ===== MODELLO: DCX2_SAFE =====
+            if oa and MIN_ODD <= oa <= 1.90 and prob_away and prob_draw:
+                probx2 = prob_away + prob_draw
+                if probx2 >= 75:
+                    p_imp2 = implied_prob(oa) or 0
+                    value = (probx2 - p_imp2) / 100.0
+                    score = value + (probx2 - 75) / 100.0
+                    qx2 = max(1.25, min(1.70, oa * 0.65))
+                    picks.append({
+                        "model": "DCX2_SAFE",
+                        "category": "SAFE_PICKS",
+                        "fixture_id": fixture_id,
+                        "league": league,
+                        "home": home,
+                        "away": away,
+                        "pick": "X2",
+                        "odd": qx2,
+                        "score": score,
+                    })
+
+            # ===== MODELLO: O2.5_STRONG =====
+            if o_o25 and 1.45 <= o_o25 <= 2.10 and exp_goals >= 2.6:
+                p_imp25 = implied_prob(o_o25) or 0
+                prob_model = min(96, exp_goals * 30)
+                value = (prob_model - p_imp25) / 100.0
+                score = value + max(0, exp_goals - 2.6)
+                picks.append({
+                    "model": "O2_5_STRONG",
+                    "category": "OVER_UNDER_TIPS",
+                    "fixture_id": fixture_id,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "pick": "Over 2.5 goals",
+                    "odd": o_o25,
+                    "score": score,
+                })
+
+        except Exception as e:
+            print("# ERR PICK", e, file=sys.stderr)
+            continue
+
+    # ranking globale
+    picks.sort(key=lambda x: x["score"], reverse=True)
+    return picks
+
+
+def build_categories(picks):
+    cats = {
+        "SAFE_PICKS": [],
+        "SINGLE_GAME": [],
+        "TOP_5_TIPS": [],
+        "BEST_TIPS_OF_DAY": [],
+        "OVER_UNDER_TIPS": [],
+        "DAILY_2PLUS": [],
+        "DAILY_10PLUS": [],
+    }
+
+    # best global
+    cats["TOP_5_TIPS"] = picks[:5]
+    cats["BEST_TIPS_OF_DAY"] = picks[:15]
+
+    # safe picks (quota 1.20-1.50)
+    safe = [p for p in picks if p["category"] == "SAFE_PICKS" and 1.20 <= (p["odd"] or 0) <= 1.55]
+    cats["SAFE_PICKS"] = safe[:10]
+
+    # over/under tips
+    ou = [p for p in picks if p["model"].startswith("O") or p["model"].startswith("U") or "BTTS" in p["model"]]
+    cats["OVER_UNDER_TIPS"] = ou[:15]
+
+    # single game = miglior pick assoluto
+    cats["SINGLE_GAME"] = picks[:1]
+
+    # daily 2+ odds: prendi 2–3 safe picks finché quota totale ~2–3
+    ticket = []
+    prod = 1.0
+    for p in safe:
+        if p["odd"] and prod * p["odd"] <= 3.0:
+            ticket.append(p)
+            prod *= p["odd"]
+        if prod >= 2.0:
+            break
+    cats["DAILY_2PLUS"] = ticket
+
+    # daily 10+ odds: prendi picks solide con odd 1.30–1.80 finché quota totale ~10
+    ticket10 = []
+    prod10 = 1.0
+    for p in picks:
+        if 1.30 <= (p["odd"] or 0) <= 1.80:
+            ticket10.append(p)
+            prod10 *= p["odd"]
+        if prod10 >= 10.0:
+            break
+    cats["DAILY_10PLUS"] = ticket10
+
+    return cats
+
+
+# ==========================
+# SHEETDB
+# ==========================
+
+def sheetdb_clear_sheet(sheet_name):
+    # con SheetDB tipicamente fai DELETE con param ?sheet=Nome
+    try:
+        url = f"{SHEETDB_URL}?sheet={urllib.parse.quote(sheet_name)}"
+        requests.delete(url, timeout=20)
+    except Exception as e:
+        print(f"# ERRORE clear sheet {sheet_name}: {e}", file=sys.stderr)
+
+
+def sheetdb_append_rows(sheet_name, rows):
+    if not rows:
+        return
+    try:
+        url = f"{SHEETDB_URL}?sheet={urllib.parse.quote(sheet_name)}"
+        payload = {"data": rows}
+        requests.post(url, json=payload, timeout=30)
+    except Exception as e:
+        print(f"# ERRORE append sheet {sheet_name}: {e}", file=sys.stderr)
+
+
+def push_raw_and_picks_to_sheetdb(rows, categories):
+    # RAW
+    sheetdb_clear_sheet("RAW")
+    sheetdb_append_rows("RAW", rows)
+
+    # PICKS: una riga per pick con categoria
+    out = []
+    for cat_name, plist in categories.items():
+        for p in plist:
+            out.append({
+                "date": today_str(),
+                "category": cat_name,
+                "model": p["model"],
+                "fixture_id": p["fixture_id"],
+                "league": p["league"],
+                "home": p["home"],
+                "away": p["away"],
+                "pick": p["pick"],
+                "odd": p["odd"],
+                "score": round(p["score"], 3),
+            })
+
+    sheetdb_clear_sheet("PICKS")
+    sheetdb_append_rows("PICKS", out)
+
+
+# ==========================
+# RUN MARKER
+# ==========================
+
+def already_ran_for_today():
     try:
         with open(RUN_MARKER_PATH, "r") as f:
-            return f.read().strip() == TARGET_DATE
+            return f.read().strip() == today_str()
     except:
         return False
 
@@ -625,36 +749,60 @@ def already_ran_for_target_date():
 def set_run_marker():
     try:
         with open(RUN_MARKER_PATH, "w") as f:
-            f.write(TARGET_DATE)
+            f.write(today_str())
     except:
+        pass
+
+
+def run_pipeline():
+    target = today_str()
+    print(f"# PIPELINE START {target}", file=sys.stderr)
+    rows = build_rows_for_date(target)
+    print(f"# Rows raccolte: {len(rows)}", file=sys.stderr)
+    picks = generate_picks(rows)
+    print(f"# Picks generate: {len(picks)}", file=sys.stderr)
+    cats = build_categories(picks)
+    push_raw_and_picks_to_sheetdb(rows, cats)
+    print("# PIPELINE END", file=sys.stderr)
+    return rows, picks, cats
+
+
+# ==========================
+# HTTP SERVER PER RENDER
+# ==========================
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/run":
+            # lancia pipeline se non già fatta oggi
+            if not already_ran_for_today():
+                rows, picks, cats = run_pipeline()
+                set_run_marker()
+                text = f"OK pipeline eseguita. rows={len(rows)} picks={len(picks)}"
+            else:
+                text = "Già eseguito oggi"
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(text.encode("utf-8"))
+        else:
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"OK\n")
+
+    def log_message(self, format, *args):
+        # meno rumore nei log
         pass
 
 
 def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK\n")
-
-        def log_message(self, format, *args):
-            pass
-
     with socketserver.TCPServer(("", port), Handler) as httpd:
         print(f"# HTTP server running on port {port}", file=sys.stderr)
         httpd.serve_forever()
 
 
 if __name__ == "__main__":
-    if not already_ran_for_target_date():
-        print("# Avvio scraping", file=sys.stderr)
-        main()
-        set_run_marker()
-        print("# Scraping completato", file=sys.stderr)
-    else:
-        print("# Scraping già fatto oggi", file=sys.stderr)
-
     run_http_server()
