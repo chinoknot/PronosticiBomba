@@ -1,12 +1,11 @@
 import requests
-from datetime import date
 import sys
 
 # =========================================================
 # CONFIGURAZIONE
 # =========================================================
 
-API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"  # puoi lasciarla così o mettere in env var
+API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"  # puoi spostarla in ENV se vuoi
 BASE_URL = "https://v3.football.api-sports.io"
 
 HEADERS = {
@@ -14,12 +13,9 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Coppe UEFA segnate come "World" nell'API ma che vogliamo includere comunque
-# (ID da documentazione/comunità: UCL=2, UEL=3, Conference=4, Super Cup=5) :contentReference[oaicite:5]{index=5}
-EUROPEAN_UEFA_LEAGUE_IDS = {2, 3, 4, 5}
-
 # Data target: oggi per te è 26/11/2025
-TARGET_DATE = "2025-11-26"  # cambia a date.today().isoformat() se poi vuoi dinamico
+# Se in futuro vuoi la data dinamica: usa date.today().isoformat()
+TARGET_DATE = "2025-11-26"
 
 
 # =========================================================
@@ -43,69 +39,30 @@ def api_get(path, params=None):
 
 
 # =========================================================
-# 1) PAESI EUROPEI
+# 1) FIXTURES DI OGGI (NESSUN FILTRO)
 # =========================================================
 
-def get_european_country_names():
+def get_fixtures_for_date(target_date):
     """
-    Scarica tutti i paesi da /countries e ritorna l'insieme dei nomi
-    con continent == 'Europe'.
+    Prende tutti i fixtures del giorno target_date in tutte le nazioni/leghe.
     """
-    countries = api_get("/countries")
-    europe = set()
-
-    for c in countries:
-        continent = c.get("continent")
-        name = c.get("name")
-        if continent == "Europe" and name:
-            europe.add(name)
-
-    print(f"# Paesi europei trovati: {len(europe)}", file=sys.stderr)
-    return europe
-
-
-# =========================================================
-# 2) FIXTURES DI OGGI IN EUROPA (+ COPPE UEFA)
-# =========================================================
-
-def get_european_fixtures_for_date(target_date):
-    """
-    Prende tutti i fixtures della data indicata e filtra:
-      - tutte le leghe con league.country in Europa
-      - più le coppe UEFA (league.id in EUROPEAN_UEFA_LEAGUE_IDS)
-    """
-    europe_countries = get_european_country_names()
-
     fixtures = api_get(
         "/fixtures",
         {
             "date": target_date,
-            "timezone": "Europe/Dublin",
+            "timezone": "Europe/Dublin",  # per avere orario coerente con te
         },
     )
 
-    selected = []
-    for f in fixtures:
-        league = f.get("league", {})
-        league_id = league.get("id")
-        league_country = league.get("country")
-
-        if league_country in europe_countries or league_id in EUROPEAN_UEFA_LEAGUE_IDS:
-            selected.append(f)
-
     print(
-        f"# Partite trovate nel mondo per {target_date}: {len(fixtures)}",
+        f"# Partite totali trovate per {target_date}: {len(fixtures)}",
         file=sys.stderr,
     )
-    print(
-        f"# Partite filtrate per Europa (+coppe UEFA) per {target_date}: {len(selected)}",
-        file=sys.stderr,
-    )
-    return selected
+    return fixtures
 
 
 # =========================================================
-# 3) PREDICTIONS PER FIXTURE
+# 2) PREDICTIONS PER FIXTURE
 # =========================================================
 
 def get_prediction_for_fixture(fixture_id):
@@ -135,7 +92,7 @@ def get_prediction_for_fixture(fixture_id):
 
 
 # =========================================================
-# 4) ODDS PRINCIPALI (MATCH WINNER 1X2) PER FIXTURE
+# 3) ODDS PRINCIPALI (MATCH WINNER 1X2) PER FIXTURE
 # =========================================================
 
 def get_main_odds_for_fixture(fixture_id):
@@ -176,7 +133,7 @@ def get_main_odds_for_fixture(fixture_id):
 
 
 # =========================================================
-# 5) STAMPA CSV NEI LOG
+# 4) STAMPA CSV NEI LOG
 # =========================================================
 
 def sanitize_field(value):
@@ -191,7 +148,7 @@ def sanitize_field(value):
 
 
 def main():
-    fixtures = get_european_fixtures_for_date(TARGET_DATE)
+    fixtures = get_fixtures_for_date(TARGET_DATE)
 
     # Header CSV
     print("### CSV_INIZIO ###")
@@ -223,7 +180,7 @@ def main():
         teams = f.get("teams", {})
 
         fixture_id = fixture_info.get("id", "")
-        date_time = fixture_info.get("date", "")  # formato ISO, es. 2025-11-26T19:45:00+00:00
+        date_time = fixture_info.get("date", "")  # ISO, es. 2025-11-26T19:45:00+00:00
 
         date_part = ""
         time_part = ""
