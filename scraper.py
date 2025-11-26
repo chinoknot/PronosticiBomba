@@ -1,144 +1,68 @@
+# FILE: print_full_csv_in_logs.py
 import requests
-import csv
 from datetime import datetime
 import time
 
-# ===================== CONFIG =====================
 API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
 BASE_URL = "https://v3.football.api-sports.io"
-HEADERS = {
-    "x-rapidapi-host": "v3.football.api-sports.io",
-    "x-rapidapi-key": API_KEY
-}
+HEADERS = {"x-rapidapi-host": "v3.football.api-sports.io", "x-rapidapi-key": API_KEY}
+TODAY = "2025-11-26"
 
-# Bookmaker che ci interessano (più stabili e con odds alte)
-BOOKMAKERS = {
-    "Bet365": 8,
-    "Pinnacle": 2,
-    "1xBet": 12
-}
+EUROPE = {"Europe","England","Italy","Spain","Germany","France","Portugal","Netherlands","Belgium","Scotland","Turkey","Greece","Austria","Switzerland","Croatia","Czech Republic","Denmark","Sweden","Norway","Poland","Romania","Serbia","Ukraine","Russia"}
 
-TODAY = datetime.now().strftime("%Y-%-m-%d")  # es. 2025-11-26
-CSV_FILE = f"europe_fixtures_full_{TODAY}.csv"
+# 1. Fixtures
+fixtures = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params={"date": TODAY, "timezone": "Europe/Rome"}).json().get("response", [])
+europe_fixtures = [f for f in fixtures if f["league"]["country"] in EUROPE]
+print(f"Partite europee oggi: {len(europe_fixtures)}\n")
 
-# Paesi europei (tutti i principali + "Europe" per le coppe)
-EUROPEAN_COUNTRIES = {
-    "Europe", "England", "Italy", "Spain", "Germany", "France", "Portugal", "Netherlands",
-    "Belgium", "Scotland", "Turkey", "Russia", "Ukraine", "Greece", "Austria", "Switzerland",
-    "Croatia", "Czech Republic", "Denmark", "Sweden", "Norway", "Poland", "Romania", "Serbia"
-}
+# 2. Iniziamo il CSV
+print("DATA,ORARIO,LEGA,CASA,FUORI,STATUS,PRED_WINNER,PRED_ADVICE,PRED_UNDER_OVER,BET365_HOME,BET365_DRAW,BET365_AWAY,BET365_OVER25,BET365_UNDER25,PINNACLE_HOME,PINNACLE_DRAW,PINNACLE_AWAY,1XBET_HOME,1XBET_DRAW,1XBET_AWAY")
 
-# =================================================
-
-def get_fixtures_today():
-    print(f"Recupero tutte le partite di oggi ({TODAY})...")
-    url = f"{BASE_URL}/fixtures"
-    params = {"date": TODAY, "timezone": "Europe/Rome"}
-    r = requests.get(url, headers=HEADERS, params=params)
-    if r.status_code != 200:
-        print(f"Errore fixtures: {r.status_code} {r.text}")
-        return []
-    data = r.json().get("response", [])
-    european = [f for f in data if f["league"]["country"] in EUROPEAN_COUNTRIES]
-    print(f"Trovate {len(european)} partite in Europa oggi")
-    return european
-
-def get_predictions(fixture_id):
-    url = f"{BASE_URL}/predictions"
-    r = requests.get(url, headers=HEADERS, params={"fixture": fixture_id})
-    if r.status_code != 200 or not r.json().get("response"):
-        return {}
-    pred = r.json()["response"][0]
-    return {
-        "Prediction_Winner": pred.get("predictions", {}).get("winner", {}).get("name", ""),
-        "Prediction_WinOrDraw": pred.get("predictions", {}).get("win_or_draw", ""),
-        "Prediction_UnderOver": pred.get("predictions", {}).get("under_over", ""),
-        "Prediction_Goals_Home": pred.get("predictions", {}).get("goals_home", ""),
-        "Prediction_Goals_Away": pred.get("predictions", {}).get("goals_away", ""),
-        "Prediction_Advice": pred.get("advice", ""),
-        "Percent_Home": pred.get("comparison", {}).get("form", {}).get("home", ""),
-        "Percent_Away": pred.get("comparison", {}).get("form", {}).get("away", ""),
-        "Percent_Att_Home": pred.get("comparison", {}).get("att", {}).get("home", ""),
-        "Percent_Def_Away": pred.get("comparison", {}).get("def", {}).get("away", ""),
-    }
-
-def get_odds(fixture_id):
-    url = f"{BASE_URL}/odds"
-    params = {"fixture": fixture_id, "timezone": "Europe/Rome"}
-    r = requests.get(url, headers=HEADERS, params=params)
-    if r.status_code != 200 or not r.json().get("response"):
-        return {}
+for f in europe_fixtures:
+    fid = f["fixture"]["id"]
+    home = f["teams"]["home"]["name"]
+    away = f["teams"]["away"]["name"]
+    league = f["league"]["name"]
+    kickoff = f["fixture"]["date"][11:16]  # solo HH:MM
+    status = f["fixture"]["status"]["short"]
     
-    odds_dict = {}
-    for book in r.json()["response"][0].get("bookmakers", []):
-        name = book["name"]
-        if name not in BOOKMAKERS.values():
-            continue
-        book_name = [k for k, v in BOOKMAKERS.items() if v == book["id"]][0]
-        
-        for market in book.get("bets", []):
-            label = market["label"]
-            if label not in ["Match Winner", "Over/Under", "Both Teams To Score"]:
-                continue
-            for value in market["values"]:
-                key = f"{book_name}_{label}_{value['value'].replace(' ', '')}"
-                odds_dict[key] = value["odd"]
-    return odds_dict
-
-# ===================== MAIN =====================
-fixtures = get_fixtures_today()
-if not fixtures:
-    print("Nessuna partita trovata. Esco.")
-    exit()
-
-results = []
-total_calls = 2  # 1 fixtures + 1 leagues (se serve)
-
-print("Inizio recupero predictions + odds...")
-for i, fix in enumerate(fixtures, 1):
-    fixture_id = fix["fixture"]["id"]
-    league = fix["league"]["name"]
-    home = fix["teams"]["home"]["name"]
-    away = fix["teams"]["away"]["name"]
-    kickoff = fix["fixture"]["date"]
-    status = fix["fixture"]["status"]["long"]
+    # Predictions
+    pred = requests.get(f"{BASE_URL}/predictions", headers=HEADERS, params={"fixture": fid})
+    time.sleep(0.2)
+    winner = advice = underover = "N/D"
+    if pred.status_code == 200 and pred.json().get("response"):
+        p = pred.json()["response"][0]
+        winner = p.get("predictions", {}).get("winner", {}).get("name", "N/D")
+        advice = p.get("advice", "N/D")
+        underover = p.get("predictions", {}).get("under_over", "N/D") or "N/D"
     
-    print(f"{i}/{len(fixtures)} - {home} vs {away} ({league})")
+    # Odds (solo i 3 bookmaker più stabili)
+    odds_resp = requests.get(f"{BASE_URL}/odds", headers=HEADERS, params={"fixture": fid, "bookmaker": "8,2,12", "bet": "1,3"})
+    time.sleep(0.2)
     
-    pred = get_predictions(fixture_id)
-    total_calls += 1
-    time.sleep(0.15)  # gentile con l'API
+    b365_1 = b365_x = b365_2 = b365_o25 = b365_u25 = "-"
+    pin_1 = pin_x = pin_2 = "-"
+    x1_1 = x1_x = x1_2 = "-"
     
-    odds = get_odds(fixture_id)
-    total_calls += 1
-    time.sleep(0.15)
+    if odds_resp.status_code == 200 and odds_resp.json().get("response"):
+        for book in odds_resp.json()["response"][0]["bookmakers"]:
+            name = book["name"]
+            for bet in book["bets"]:
+                if bet["label"] == "Match Winner":
+                    vals = {v["value"]: v["odd"] for v in bet["values"]}
+                    if name == "Bet365":
+                        b365_1, b365_x, b365_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
+                    elif name == "Pinnacle":
+                        pin_1, pin_x, pin_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
+                    elif name == "1xBet":
+                        x1_1, x1_x, x1_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
+                if bet["label"] == "Over/Under" and "2.5" in bet["name"]:
+                    for v in bet["values"]:
+                        if v["value"] == "Over 2.5":  b365_o25 = v["odd"] if name=="Bet365" else b365_o25
+                        if v["value"] == "Under 2.5": b365_u25 = v["odd"] if name=="Bet365" else b365_u25
     
-    row = {
-        "Date": TODAY,
-        "Kickoff_UTC": kickoff,
-        "League": league,
-        "Country": fix["league"]["country"],
-        "Home_Team": home,
-        "Away_Team": away,
-        "Status": status,
-        **pred,
-        **odds
-    }
-    results.append(row)
+    # Stampa la riga completa
+    row = f'{TODAY},{kickoff},{league},{home},{away},{status},{winner},"{advice}",{underover},{b365_1},{b365_x},{b365_2},{b365_o25},{b365_u25},{pin_1},{pin_x},{pin_2},{x1_1},{x1_x},{x1_2}'
+    print(row)
 
-# ===================== CSV =====================
-keys = set()
-for r in results:
-    keys.update(r.keys())
-keys = sorted(keys)
-
-with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=keys)
-    writer.writeheader()
-    writer.writerows(results)
-
-print(f"\nFINITO!")
-print(f"Partite elaborate: {len(results)}")
-print(f"Chiamate API stimate: ~{total_calls}")
-print(f"CSV salvato: {CSV_FILE}")
-print(f"Puoi scaricarlo e caricarlo subito su Google Sheets")
+print("\nFINE CSV – seleziona tutto sopra e incolla in Google Sheets/Excel")
