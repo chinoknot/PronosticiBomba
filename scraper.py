@@ -796,13 +796,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # meno rumore nei log
         pass
 
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
 
 def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
-    with socketserver.TCPServer(("", port), Handler) as httpd:
+    with ReuseTCPServer(("", port), Handler) as httpd:
         print(f"# HTTP server running on port {port}", file=sys.stderr)
         httpd.serve_forever()
 
 
 if __name__ == "__main__":
     run_http_server()
+
