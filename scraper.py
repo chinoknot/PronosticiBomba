@@ -3,6 +3,7 @@ import sys
 import os
 import http.server
 import socketserver
+import time
 
 # =========================================================
 # CONFIGURAZIONE
@@ -16,11 +17,14 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Data target (per ora fissa, poi la potrai rendere dinamica)
+# Data target (per ora fissa, poi la puoi rendere dinamica)
 TARGET_DATE = "2025-11-26"
 
 # Marker per evitare doppia esecuzione sulla stessa istanza
 RUN_MARKER_PATH = "/tmp/last_run_marker.txt"
+
+# Cache per le statistiche di squadra (league, season, team)
+TEAM_STATS_CACHE = {}
 
 
 # =========================================================
@@ -28,7 +32,7 @@ RUN_MARKER_PATH = "/tmp/last_run_marker.txt"
 # =========================================================
 
 def api_get(path, params=None, timeout=15):
-    """Wrapper semplice: torna solo 'response'."""
+    """Wrapper semplice: torna solo 'response' (lista) per gli endpoint standard."""
     url = f"{BASE_URL}{path}"
     r = requests.get(url, headers=HEADERS, params=params or {}, timeout=timeout)
     r.raise_for_status()
@@ -145,7 +149,7 @@ def get_odds_for_fixture(fixture_id):
     if not bookmakers:
         return {}
 
-    # 1) bookmaker principale (Bet365 se c'è)
+    # bookmaker principale (Bet365 se c'è)
     chosen = None
     for b in bookmakers:
         if b.get("name") in PREFERRED_BOOKMAKER_NAMES:
@@ -177,7 +181,7 @@ def get_odds_for_fixture(fixture_id):
 
 
 # =========================================================
-# STATISTICHE FIXTURE (CORNERS, CARDS)
+# STATISTICHE FIXTURE (CORNERS, CARDS) - /fixtures/statistics
 # =========================================================
 
 def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
@@ -187,7 +191,6 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
     """
     stats_list = api_get("/fixtures/statistics", {"fixture": fixture_id}, timeout=20)
 
-    # valori di default vuoti (stringhe, poi sanitize li gestisce)
     result = {
         "corners_home": "",
         "corners_away": "",
@@ -197,7 +200,6 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
         "red_cards_away": "",
     }
 
-    # costruiamo dizionario: team_id -> { type: value }
     per_team = {}
 
     for entry in stats_list:
@@ -234,6 +236,146 @@ def get_statistics_for_fixture(fixture_id, home_team_id, away_team_id):
 
 
 # =========================================================
+# TEAM STATISTICS - /teams/statistics (per squadra, league, season)
+# =========================================================
+
+def get_team_statistics_raw(league_id, season, team_id):
+    """
+    Ritorna il 'response' grezzo di /teams/statistics (dict).
+    Usa cache per non ripetere le chiamate.
+    """
+    if not league_id or not season or not team_id:
+        return {}
+
+    key = (league_id, season, team_id)
+    if key in TEAM_STATS_CACHE:
+        return TEAM_STATS_CACHE[key]
+
+    url = f"{BASE_URL}/teams/statistics"
+    params = {"league": league_id, "season": season, "team": team_id}
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        ts = data.get("response") or {}
+    except Exception as e:
+        print(f"# ERRORE /teams/statistics league={league_id} season={season} team={team_id}: {e}", file=sys.stderr)
+        ts = {}
+
+    TEAM_STATS_CACHE[key] = ts
+
+    # piccolo throttling per non bombardare l'API
+    time.sleep(0.2)
+
+    return ts
+
+
+def flatten_team_stats(ts, prefix):
+    """
+    'ts' è il dict 'response' di /teams/statistics.
+    Ritorna un dict con chiavi prefissate (home_/away_).
+    """
+    out = {}
+
+    if not isinstance(ts, dict) or not ts:
+        # riempiamo con vuoti, tanto poi .get(..., "") in main copre i None
+        keys = [
+            "form",
+            "fixtures_played_home", "fixtures_played_away",
+            "fixtures_wins_home", "fixtures_wins_away",
+            "fixtures_draws_home", "fixtures_draws_away",
+            "fixtures_loses_home", "fixtures_loses_away",
+            "goals_for_total_home", "goals_for_total_away",
+            "goals_against_total_home", "goals_against_total_away",
+            "goals_for_avg_home", "goals_for_avg_away",
+            "goals_against_avg_home", "goals_against_avg_away",
+            "clean_sheet_home", "clean_sheet_away",
+            "failed_to_score_home", "failed_to_score_away",
+            "streak_wins", "streak_draws", "streak_loses",
+        ]
+        for k in keys:
+            out[prefix + k] = ""
+        # OU keys dinamiche, li definiamo dopo comunque
+    else:
+        form = ts.get("form")
+
+        fixtures = ts.get("fixtures") or {}
+        played = fixtures.get("played") or {}
+        wins = fixtures.get("wins") or {}
+        draws = fixtures.get("draws") or {}
+        loses = fixtures.get("loses") or {}
+
+        goals = ts.get("goals") or {}
+        g_for_total = (goals.get("for") or {}).get("total") or {}
+        g_against_total = (goals.get("against") or {}).get("total") or {}
+        g_for_avg = (goals.get("for") or {}).get("average") or {}
+        g_against_avg = (goals.get("against") or {}).get("average") or {}
+
+        clean_sheet = ts.get("clean_sheet") or {}
+        failed_to_score = ts.get("failed_to_score") or {}
+        biggest = ts.get("biggest") or {}
+        streak = biggest.get("streak") or {}
+
+        out[prefix + "form"] = form or ""
+
+        out[prefix + "fixtures_played_home"] = played.get("home", "")
+        out[prefix + "fixtures_played_away"] = played.get("away", "")
+        out[prefix + "fixtures_wins_home"] = wins.get("home", "")
+        out[prefix + "fixtures_wins_away"] = wins.get("away", "")
+        out[prefix + "fixtures_draws_home"] = draws.get("home", "")
+        out[prefix + "fixtures_draws_away"] = draws.get("away", "")
+        out[prefix + "fixtures_loses_home"] = loses.get("home", "")
+        out[prefix + "fixtures_loses_away"] = loses.get("away", "")
+
+        out[prefix + "goals_for_total_home"] = g_for_total.get("home", "")
+        out[prefix + "goals_for_total_away"] = g_for_total.get("away", "")
+        out[prefix + "goals_against_total_home"] = g_against_total.get("home", "")
+        out[prefix + "goals_against_total_away"] = g_against_total.get("away", "")
+
+        out[prefix + "goals_for_avg_home"] = g_for_avg.get("home", "")
+        out[prefix + "goals_for_avg_away"] = g_for_avg.get("away", "")
+        out[prefix + "goals_against_avg_home"] = g_against_avg.get("home", "")
+        out[prefix + "goals_against_avg_away"] = g_against_avg.get("away", "")
+
+        out[prefix + "clean_sheet_home"] = clean_sheet.get("home", "")
+        out[prefix + "clean_sheet_away"] = clean_sheet.get("away", "")
+        out[prefix + "failed_to_score_home"] = failed_to_score.get("home", "")
+        out[prefix + "failed_to_score_away"] = failed_to_score.get("away", "")
+
+        out[prefix + "streak_wins"] = streak.get("wins", "")
+        out[prefix + "streak_draws"] = streak.get("draws", "")
+        out[prefix + "streak_loses"] = streak.get("loses", "")
+
+        # Under/Over per for/against alle soglie 0.5, 1.5, 2.5, 3.5
+        gf_uo = (goals.get("for") or {}).get("under_over") or {}
+        ga_uo = (goals.get("against") or {}).get("under_over") or {}
+
+        def get_ou(uo_dict, line):
+            d = uo_dict.get(str(line)) or {}
+            return d.get("over", ""), d.get("under", "")
+
+        for line in [0.5, 1.5, 2.5, 3.5]:
+            label = str(line).replace(".", "_")
+            over_for, under_for = get_ou(gf_uo, line)
+            over_against, under_against = get_ou(ga_uo, line)
+
+            out[f"{prefix}ou_{label}_for_over"] = over_for
+            out[f"{prefix}ou_{label}_for_under"] = under_for
+            out[f"{prefix}ou_{label}_against_over"] = over_against
+            out[f"{prefix}ou_{label}_against_under"] = under_against
+
+    # Se per qualche motivo mancano alcune chiavi OU, le assicuriamo vuote
+    for line in [0.5, 1.5, 2.5, 3.5]:
+        label = str(line).replace(".", "_")
+        for part in ["for_over", "for_under", "against_over", "against_under"]:
+            key = f"{prefix}ou_{label}_{part}"
+            if key not in out:
+                out[key] = ""
+
+    return out
+
+
+# =========================================================
 # CSV
 # =========================================================
 
@@ -253,7 +395,41 @@ def main():
         "prediction_winner_name;prediction_winner_comment;prediction_win_or_draw;"
         "prediction_under_over;prediction_advice;prediction_goals_home;prediction_goals_away;"
         "prob_home;prob_draw;prob_away;bookmaker;odd_home;odd_draw;odd_away;"
-        "odd_ou_1_5_over;odd_ou_2_5_over;odd_ou_2_5_under;odd_ou_3_5_over;odd_btts_yes;odd_btts_no"
+        "odd_ou_1_5_over;odd_ou_2_5_over;odd_ou_2_5_under;odd_ou_3_5_over;odd_btts_yes;odd_btts_no;"
+        # TEAM STATS HOME
+        "home_form;"
+        "home_fixtures_played_home;home_fixtures_played_away;"
+        "home_fixtures_wins_home;home_fixtures_wins_away;"
+        "home_fixtures_draws_home;home_fixtures_draws_away;"
+        "home_fixtures_loses_home;home_fixtures_loses_away;"
+        "home_goals_for_total_home;home_goals_for_total_away;"
+        "home_goals_against_total_home;home_goals_against_total_away;"
+        "home_goals_for_avg_home;home_goals_for_avg_away;"
+        "home_goals_against_avg_home;home_goals_against_avg_away;"
+        "home_clean_sheet_home;home_clean_sheet_away;"
+        "home_failed_to_score_home;home_failed_to_score_away;"
+        "home_streak_wins;home_streak_draws;home_streak_loses;"
+        "home_ou_0_5_for_over;home_ou_0_5_for_under;home_ou_0_5_against_over;home_ou_0_5_against_under;"
+        "home_ou_1_5_for_over;home_ou_1_5_for_under;home_ou_1_5_against_over;home_ou_1_5_against_under;"
+        "home_ou_2_5_for_over;home_ou_2_5_for_under;home_ou_2_5_against_over;home_ou_2_5_against_under;"
+        "home_ou_3_5_for_over;home_ou_3_5_for_under;home_ou_3_5_against_over;home_ou_3_5_against_under;"
+        # TEAM STATS AWAY
+        "away_form;"
+        "away_fixtures_played_home;away_fixtures_played_away;"
+        "away_fixtures_wins_home;away_fixtures_wins_away;"
+        "away_fixtures_draws_home;away_fixtures_draws_away;"
+        "away_fixtures_loses_home;away_fixtures_loses_away;"
+        "away_goals_for_total_home;away_goals_for_total_away;"
+        "away_goals_against_total_home;away_goals_against_total_away;"
+        "away_goals_for_avg_home;away_goals_for_avg_away;"
+        "away_goals_against_avg_home;away_goals_against_avg_away;"
+        "away_clean_sheet_home;away_clean_sheet_away;"
+        "away_failed_to_score_home;away_failed_to_score_away;"
+        "away_streak_wins;away_streak_draws;away_streak_loses;"
+        "away_ou_0_5_for_over;away_ou_0_5_for_under;away_ou_0_5_against_over;away_ou_0_5_against_under;"
+        "away_ou_1_5_for_over;away_ou_1_5_for_under;away_ou_1_5_against_over;away_ou_1_5_against_under;"
+        "away_ou_2_5_for_over;away_ou_2_5_for_under;away_ou_2_5_against_over;away_ou_2_5_against_under;"
+        "away_ou_3_5_for_over;away_ou_3_5_for_under;away_ou_3_5_against_over;away_ou_3_5_against_under"
     )
     csv_rows.append(header)
 
@@ -278,14 +454,24 @@ def main():
             home_team_id = home_team.get("id")
             away_team_id = away_team.get("id")
 
+            league_id = league.get("id")
+            season = league.get("season")
+
             # Predictions
             pred = get_prediction_for_fixture(fixture_id)
 
             # Odds
             odds = get_odds_for_fixture(fixture_id)
 
-            # Statistiche (corners + cards)
+            # Statistiche match (corners + cards)
             stats = get_statistics_for_fixture(fixture_id, home_team_id, away_team_id)
+
+            # Team statistics home/away (con cache + throttling)
+            home_ts_raw = get_team_statistics_raw(league_id, season, home_team_id)
+            away_ts_raw = get_team_statistics_raw(league_id, season, away_team_id)
+
+            home_ts = flatten_team_stats(home_ts_raw, "home_")
+            away_ts = flatten_team_stats(away_ts_raw, "away_")
 
             row = [
                 fixture_id,
@@ -329,6 +515,88 @@ def main():
                 odds.get("odd_ou_3_5_over", ""),
                 odds.get("odd_btts_yes", ""),
                 odds.get("odd_btts_no", ""),
+                # HOME TEAM STATS
+                home_ts.get("home_form", ""),
+                home_ts.get("home_fixtures_played_home", ""),
+                home_ts.get("home_fixtures_played_away", ""),
+                home_ts.get("home_fixtures_wins_home", ""),
+                home_ts.get("home_fixtures_wins_away", ""),
+                home_ts.get("home_fixtures_draws_home", ""),
+                home_ts.get("home_fixtures_draws_away", ""),
+                home_ts.get("home_fixtures_loses_home", ""),
+                home_ts.get("home_fixtures_loses_away", ""),
+                home_ts.get("home_goals_for_total_home", ""),
+                home_ts.get("home_goals_for_total_away", ""),
+                home_ts.get("home_goals_against_total_home", ""),
+                home_ts.get("home_goals_against_total_away", ""),
+                home_ts.get("home_goals_for_avg_home", ""),
+                home_ts.get("home_goals_for_avg_away", ""),
+                home_ts.get("home_goals_against_avg_home", ""),
+                home_ts.get("home_goals_against_avg_away", ""),
+                home_ts.get("home_clean_sheet_home", ""),
+                home_ts.get("home_clean_sheet_away", ""),
+                home_ts.get("home_failed_to_score_home", ""),
+                home_ts.get("home_failed_to_score_away", ""),
+                home_ts.get("home_streak_wins", ""),
+                home_ts.get("home_streak_draws", ""),
+                home_ts.get("home_streak_loses", ""),
+                home_ts.get("home_ou_0_5_for_over", ""),
+                home_ts.get("home_ou_0_5_for_under", ""),
+                home_ts.get("home_ou_0_5_against_over", ""),
+                home_ts.get("home_ou_0_5_against_under", ""),
+                home_ts.get("home_ou_1_5_for_over", ""),
+                home_ts.get("home_ou_1_5_for_under", ""),
+                home_ts.get("home_ou_1_5_against_over", ""),
+                home_ts.get("home_ou_1_5_against_under", ""),
+                home_ts.get("home_ou_2_5_for_over", ""),
+                home_ts.get("home_ou_2_5_for_under", ""),
+                home_ts.get("home_ou_2_5_against_over", ""),
+                home_ts.get("home_ou_2_5_against_under", ""),
+                home_ts.get("home_ou_3_5_for_over", ""),
+                home_ts.get("home_ou_3_5_for_under", ""),
+                home_ts.get("home_ou_3_5_against_over", ""),
+                home_ts.get("home_ou_3_5_against_under", ""),
+                # AWAY TEAM STATS
+                away_ts.get("away_form", ""),
+                away_ts.get("away_fixtures_played_home", ""),
+                away_ts.get("away_fixtures_played_away", ""),
+                away_ts.get("away_fixtures_wins_home", ""),
+                away_ts.get("away_fixtures_wins_away", ""),
+                away_ts.get("away_fixtures_draws_home", ""),
+                away_ts.get("away_fixtures_draws_away", ""),
+                away_ts.get("away_fixtures_loses_home", ""),
+                away_ts.get("away_fixtures_loses_away", ""),
+                away_ts.get("away_goals_for_total_home", ""),
+                away_ts.get("away_goals_for_total_away", ""),
+                away_ts.get("away_goals_against_total_home", ""),
+                away_ts.get("away_goals_against_total_away", ""),
+                away_ts.get("away_goals_for_avg_home", ""),
+                away_ts.get("away_goals_for_avg_away", ""),
+                away_ts.get("away_goals_against_avg_home", ""),
+                away_ts.get("away_goals_against_avg_away", ""),
+                away_ts.get("away_clean_sheet_home", ""),
+                away_ts.get("away_clean_sheet_away", ""),
+                away_ts.get("away_failed_to_score_home", ""),
+                away_ts.get("away_failed_to_score_away", ""),
+                away_ts.get("away_streak_wins", ""),
+                away_ts.get("away_streak_draws", ""),
+                away_ts.get("away_streak_loses", ""),
+                away_ts.get("away_ou_0_5_for_over", ""),
+                away_ts.get("away_ou_0_5_for_under", ""),
+                away_ts.get("away_ou_0_5_against_over", ""),
+                away_ts.get("away_ou_0_5_against_under", ""),
+                away_ts.get("away_ou_1_5_for_over", ""),
+                away_ts.get("away_ou_1_5_for_under", ""),
+                away_ts.get("away_ou_1_5_against_over", ""),
+                away_ts.get("away_ou_1_5_against_under", ""),
+                away_ts.get("away_ou_2_5_for_over", ""),
+                away_ts.get("away_ou_2_5_for_under", ""),
+                away_ts.get("away_ou_2_5_against_over", ""),
+                away_ts.get("away_ou_2_5_against_under", ""),
+                away_ts.get("away_ou_3_5_for_over", ""),
+                away_ts.get("away_ou_3_5_for_under", ""),
+                away_ts.get("away_ou_3_5_against_over", ""),
+                away_ts.get("away_ou_3_5_against_under", ""),
             ]
 
             csv_rows.append(";".join(sanitize(v) for v in row))
