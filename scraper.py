@@ -1,68 +1,268 @@
-# FILE: print_full_csv_in_logs.py
 import requests
-from datetime import datetime
-import time
+from datetime import date
+import sys
 
-API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"
+# =========================================================
+# CONFIGURAZIONE
+# =========================================================
+
+API_KEY = "daaf29bc97d50f28aa64816c7cc203bc"  # puoi lasciarla così o mettere in env var
 BASE_URL = "https://v3.football.api-sports.io"
-HEADERS = {"x-rapidapi-host": "v3.football.api-sports.io", "x-rapidapi-key": API_KEY}
-TODAY = "2025-11-26"
 
-EUROPE = {"Europe","England","Italy","Spain","Germany","France","Portugal","Netherlands","Belgium","Scotland","Turkey","Greece","Austria","Switzerland","Croatia","Czech Republic","Denmark","Sweden","Norway","Poland","Romania","Serbia","Ukraine","Russia"}
+HEADERS = {
+    "x-apisports-key": API_KEY,
+    "Accept": "application/json",
+}
 
-# 1. Fixtures
-fixtures = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params={"date": TODAY, "timezone": "Europe/Rome"}).json().get("response", [])
-europe_fixtures = [f for f in fixtures if f["league"]["country"] in EUROPE]
-print(f"Partite europee oggi: {len(europe_fixtures)}\n")
+# Coppe UEFA segnate come "World" nell'API ma che vogliamo includere comunque
+# (ID da documentazione/comunità: UCL=2, UEL=3, Conference=4, Super Cup=5) :contentReference[oaicite:5]{index=5}
+EUROPEAN_UEFA_LEAGUE_IDS = {2, 3, 4, 5}
 
-# 2. Iniziamo il CSV
-print("DATA,ORARIO,LEGA,CASA,FUORI,STATUS,PRED_WINNER,PRED_ADVICE,PRED_UNDER_OVER,BET365_HOME,BET365_DRAW,BET365_AWAY,BET365_OVER25,BET365_UNDER25,PINNACLE_HOME,PINNACLE_DRAW,PINNACLE_AWAY,1XBET_HOME,1XBET_DRAW,1XBET_AWAY")
+# Data target: oggi per te è 26/11/2025
+TARGET_DATE = "2025-11-26"  # cambia a date.today().isoformat() se poi vuoi dinamico
 
-for f in europe_fixtures:
-    fid = f["fixture"]["id"]
-    home = f["teams"]["home"]["name"]
-    away = f["teams"]["away"]["name"]
-    league = f["league"]["name"]
-    kickoff = f["fixture"]["date"][11:16]  # solo HH:MM
-    status = f["fixture"]["status"]["short"]
-    
-    # Predictions
-    pred = requests.get(f"{BASE_URL}/predictions", headers=HEADERS, params={"fixture": fid})
-    time.sleep(0.2)
-    winner = advice = underover = "N/D"
-    if pred.status_code == 200 and pred.json().get("response"):
-        p = pred.json()["response"][0]
-        winner = p.get("predictions", {}).get("winner", {}).get("name", "N/D")
-        advice = p.get("advice", "N/D")
-        underover = p.get("predictions", {}).get("under_over", "N/D") or "N/D"
-    
-    # Odds (solo i 3 bookmaker più stabili)
-    odds_resp = requests.get(f"{BASE_URL}/odds", headers=HEADERS, params={"fixture": fid, "bookmaker": "8,2,12", "bet": "1,3"})
-    time.sleep(0.2)
-    
-    b365_1 = b365_x = b365_2 = b365_o25 = b365_u25 = "-"
-    pin_1 = pin_x = pin_2 = "-"
-    x1_1 = x1_x = x1_2 = "-"
-    
-    if odds_resp.status_code == 200 and odds_resp.json().get("response"):
-        for book in odds_resp.json()["response"][0]["bookmakers"]:
-            name = book["name"]
-            for bet in book["bets"]:
-                if bet["label"] == "Match Winner":
-                    vals = {v["value"]: v["odd"] for v in bet["values"]}
-                    if name == "Bet365":
-                        b365_1, b365_x, b365_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
-                    elif name == "Pinnacle":
-                        pin_1, pin_x, pin_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
-                    elif name == "1xBet":
-                        x1_1, x1_x, x1_2 = vals.get("Home",""), vals.get("Draw",""), vals.get("Away","")
-                if bet["label"] == "Over/Under" and "2.5" in bet["name"]:
-                    for v in bet["values"]:
-                        if v["value"] == "Over 2.5":  b365_o25 = v["odd"] if name=="Bet365" else b365_o25
-                        if v["value"] == "Under 2.5": b365_u25 = v["odd"] if name=="Bet365" else b365_u25
-    
-    # Stampa la riga completa
-    row = f'{TODAY},{kickoff},{league},{home},{away},{status},{winner},"{advice}",{underover},{b365_1},{b365_x},{b365_2},{b365_o25},{b365_u25},{pin_1},{pin_x},{pin_2},{x1_1},{x1_x},{x1_2}'
-    print(row)
 
-print("\nFINE CSV – seleziona tutto sopra e incolla in Google Sheets/Excel")
+# =========================================================
+# FUNZIONI DI BASE PER LA CHIAMATA API
+# =========================================================
+
+def api_get(path, params=None):
+    """Wrapper semplice per chiamare l'API-FOOTBALL e tornare solo 'response'."""
+    url = f"{BASE_URL}{path}"
+    r = requests.get(url, headers=HEADERS, params=params or {}, timeout=15)
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        print(f"# ERRORE HTTP su {url}: {e}", file=sys.stderr)
+        return []
+
+    data = r.json()
+    if data.get("errors"):
+        print(f"# ERRORI API su {url}: {data['errors']}", file=sys.stderr)
+    return data.get("response", [])
+
+
+# =========================================================
+# 1) PAESI EUROPEI
+# =========================================================
+
+def get_european_country_names():
+    """
+    Scarica tutti i paesi da /countries e ritorna l'insieme dei nomi
+    con continent == 'Europe'.
+    """
+    countries = api_get("/countries")
+    europe = set()
+
+    for c in countries:
+        continent = c.get("continent")
+        name = c.get("name")
+        if continent == "Europe" and name:
+            europe.add(name)
+
+    print(f"# Paesi europei trovati: {len(europe)}", file=sys.stderr)
+    return europe
+
+
+# =========================================================
+# 2) FIXTURES DI OGGI IN EUROPA (+ COPPE UEFA)
+# =========================================================
+
+def get_european_fixtures_for_date(target_date):
+    """
+    Prende tutti i fixtures della data indicata e filtra:
+      - tutte le leghe con league.country in Europa
+      - più le coppe UEFA (league.id in EUROPEAN_UEFA_LEAGUE_IDS)
+    """
+    europe_countries = get_european_country_names()
+
+    fixtures = api_get(
+        "/fixtures",
+        {
+            "date": target_date,
+            "timezone": "Europe/Dublin",
+        },
+    )
+
+    selected = []
+    for f in fixtures:
+        league = f.get("league", {})
+        league_id = league.get("id")
+        league_country = league.get("country")
+
+        if league_country in europe_countries or league_id in EUROPEAN_UEFA_LEAGUE_IDS:
+            selected.append(f)
+
+    print(
+        f"# Partite trovate nel mondo per {target_date}: {len(fixtures)}",
+        file=sys.stderr,
+    )
+    print(
+        f"# Partite filtrate per Europa (+coppe UEFA) per {target_date}: {len(selected)}",
+        file=sys.stderr,
+    )
+    return selected
+
+
+# =========================================================
+# 3) PREDICTIONS PER FIXTURE
+# =========================================================
+
+def get_prediction_for_fixture(fixture_id):
+    """
+    Chiama /predictions?fixture={id} e torna un dict con info essenziali.
+    """
+    preds = api_get("/predictions", {"fixture": fixture_id})
+    if not preds:
+        return {}
+
+    # La risposta è una lista, ci interessa il primo elemento
+    p_block = preds[0].get("predictions") or {}
+
+    winner = p_block.get("winner") or {}
+    goals = p_block.get("goals") or {}
+
+    return {
+        "pred_winner_id": winner.get("id"),
+        "pred_winner_name": winner.get("name"),
+        "pred_winner_comment": winner.get("comment"),
+        "win_or_draw": p_block.get("win_or_draw"),
+        "under_over": p_block.get("under_over"),
+        "advice": p_block.get("advice"),
+        "goals_home": goals.get("home"),
+        "goals_away": goals.get("away"),
+    }
+
+
+# =========================================================
+# 4) ODDS PRINCIPALI (MATCH WINNER 1X2) PER FIXTURE
+# =========================================================
+
+def get_main_odds_for_fixture(fixture_id):
+    """
+    Chiama /odds?fixture={id} e cerca il mercato 'Match Winner'.
+    Ritorna bookmaker usato e quote 1X2 se trovate.
+    """
+    odds_list = api_get("/odds", {"fixture": fixture_id})
+    if not odds_list:
+        return {}
+
+    # odds_list è per league/fixture. Prendiamo il primo item.
+    o = odds_list[0]
+
+    bookmakers = o.get("bookmakers") or []
+    for bookmaker in bookmakers:
+        bets = bookmaker.get("bets") or []
+
+        match_winner_bet = next(
+            (b for b in bets if b.get("name") == "Match Winner"),
+            None,
+        )
+        if not match_winner_bet:
+            continue
+
+        values = match_winner_bet.get("values") or []
+        value_map = {v.get("value"): v.get("odd") for v in values}
+
+        return {
+            "bookmaker": bookmaker.get("name"),
+            "odd_home": value_map.get("Home"),
+            "odd_draw": value_map.get("Draw"),
+            "odd_away": value_map.get("Away"),
+        }
+
+    # Nessun mercato 'Match Winner'
+    return {}
+
+
+# =========================================================
+# 5) STAMPA CSV NEI LOG
+# =========================================================
+
+def sanitize_field(value):
+    """
+    Converte in stringa ed elimina eventuali ';' sostituendole con ','.
+    Evita di rompere il CSV.
+    """
+    if value is None:
+        return ""
+    s = str(value)
+    return s.replace(";", ",")
+
+
+def main():
+    fixtures = get_european_fixtures_for_date(TARGET_DATE)
+
+    # Header CSV
+    print("### CSV_INIZIO ###")
+    print(
+        "fixture_id;"
+        "date;"
+        "time;"
+        "league_id;"
+        "league_name;"
+        "country;"
+        "home_team;"
+        "away_team;"
+        "prediction_winner_name;"
+        "prediction_winner_comment;"
+        "prediction_win_or_draw;"
+        "prediction_under_over;"
+        "prediction_advice;"
+        "prediction_goals_home;"
+        "prediction_goals_away;"
+        "bookmaker;"
+        "odd_home;"
+        "odd_draw;"
+        "odd_away"
+    )
+
+    for f in fixtures:
+        fixture_info = f.get("fixture", {})
+        league = f.get("league", {})
+        teams = f.get("teams", {})
+
+        fixture_id = fixture_info.get("id", "")
+        date_time = fixture_info.get("date", "")  # formato ISO, es. 2025-11-26T19:45:00+00:00
+
+        date_part = ""
+        time_part = ""
+        if isinstance(date_time, str) and len(date_time) >= 16:
+            date_part = date_time[:10]
+            time_part = date_time[11:16]  # HH:MM
+
+        # Prediction
+        pred = get_prediction_for_fixture(fixture_id) or {}
+
+        # Odds
+        odds = get_main_odds_for_fixture(fixture_id) or {}
+
+        row = [
+            fixture_id,
+            date_part,
+            time_part,
+            league.get("id", ""),
+            league.get("name", ""),
+            league.get("country", ""),
+            (teams.get("home") or {}).get("name", ""),
+            (teams.get("away") or {}).get("name", ""),
+            pred.get("pred_winner_name", ""),
+            pred.get("pred_winner_comment", ""),
+            pred.get("win_or_draw", ""),
+            pred.get("under_over", ""),
+            pred.get("advice", ""),
+            pred.get("goals_home", ""),
+            pred.get("goals_away", ""),
+            odds.get("bookmaker", ""),
+            odds.get("odd_home", ""),
+            odds.get("odd_draw", ""),
+            odds.get("odd_away", ""),
+        ]
+
+        print(";".join(sanitize_field(v) for v in row))
+
+    print("### CSV_FINE ###")
+
+
+if __name__ == "__main__":
+    main()
