@@ -47,10 +47,22 @@ def api_get(path, params=None, timeout=20):
 
 
 def to_float(x):
-    try:
-        return float(str(x).replace(",", "."))
-    except:
+    """
+    Converte stringhe tipo '1.35', '45%', '1,8', ' 2.10 ' in float.
+    Ritorna None se non convertibile.
+    """
+    if x is None:
         return None
+    try:
+        s = str(x).strip()
+        if not s:
+            return None
+        s = s.replace("%", "")       # toglie il simbolo %
+        s = s.replace(",", ".")      # virgola -> punto
+        return float(s)
+    except Exception:
+        return None
+
 
 
 def implied_prob(odd):
@@ -831,3 +843,4 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
