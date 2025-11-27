@@ -997,20 +997,47 @@ def sheetdb_append_rows(sheet_name, rows):
 
 
 def push_raw_and_picks_to_sheetdb(rows, categories):
+    # 1) RAW: appendiamo tutte le righe grezze
     sheetdb_clear_sheet("RAW")
     sheetdb_append_rows("RAW", rows)
 
+    # 2) Costruiamo una mappa fixture_id -> info base (data/ora/lega/paese)
+    fixture_info = {}
+    for r in rows:
+        fid = r.get("fixture_id")
+        if not fid:
+            continue
+        fixture_info[fid] = {
+            "match_date": r.get("date", ""),
+            "match_time": r.get("time", ""),
+            "league": r.get("league_name", ""),
+            "country": r.get("country", ""),
+        }
+
+    # 3) Prepariamo le righe per il foglio PICKS
     out = []
+    run_date = today_str()
+
     for cat_name, plist in categories.items():
         for p in plist:
+            info = fixture_info.get(p["fixture_id"], {})
             out.append({
-                "date": today_str(),
+                # quando abbiamo lanciato la pipeline
+                "run_date": run_date,
+                # data/ora della partita
+                "match_date": info.get("match_date", ""),
+                "match_time": info.get("match_time", ""),
+                # info torneo
+                "league": info.get("league", p.get("league", "")),
+                "country": info.get("country", ""),
+                # classificazione interna
                 "category": cat_name,
                 "model": p["model"],
+                # match
                 "fixture_id": p["fixture_id"],
-                "league": p["league"],
                 "home": p["home"],
                 "away": p["away"],
+                # pick
                 "pick": p["pick"],
                 "odd": p["odd"],
                 "score": round(p["score"], 3),
@@ -1018,6 +1045,7 @@ def push_raw_and_picks_to_sheetdb(rows, categories):
 
     sheetdb_clear_sheet("PICKS")
     sheetdb_append_rows("PICKS", out)
+
 
 
 # ==========================
@@ -1130,6 +1158,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
