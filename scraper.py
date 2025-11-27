@@ -633,6 +633,25 @@ def generate_picks(rows):
                     "score": score,
                 })
 
+            # O3.5_STRONG (nuovo modello)
+            if o_o35 and 1.60 <= o_o35 <= 3.50 and exp_goals >= 3.2:
+                p_imp35 = implied_prob(o_o35) or 0
+                # modello molto semplice: più alta la somma gol prevista, più prob stimata
+                prob_model = min(96, exp_goals * 25)
+                value = (prob_model - p_imp35) / 100.0 if p_imp35 else 0
+                score = value + max(0, exp_goals - 3.2)
+                picks.append({
+                    "model": "O3_5_STRONG",
+                    "category": "OVER_UNDER_TIPS",
+                    "fixture_id": fixture_id,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "pick": "Over 3.5 goals",
+                    "odd": o_o35,
+                    "score": score,
+                })
+
         except Exception as e:
             print("# ERR PICK", e, file=sys.stderr)
             continue
@@ -855,5 +874,6 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
