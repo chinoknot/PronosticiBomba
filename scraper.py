@@ -1120,8 +1120,23 @@ def start_pipeline_async():
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query or "")
+
+        # segreto configurato via env
+        secret_conf = os.environ.get("RUN_SECRET", "")
 
         if parsed.path == "/run":
+            # se è configurato un secret, lo richiediamo
+            if secret_conf:
+                key = qs.get("key", [""])[0]
+                if key != secret_conf:
+                    # accesso non autorizzato
+                    self.send_response(403)
+                    self.send_header("Content-type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Forbidden\n")
+                    return
+
             started = start_pipeline_async()
             if started:
                 text = "Pipeline avviata in background"
@@ -1135,14 +1150,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(text.encode("utf-8"))
+
         else:
+            # endpoint di healthcheck semplice
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"OK\n")
 
     def log_message(self, format, *args):
+        # niente log HTTP rumorosi
         pass
+
 
 
 class ReuseTCPServer(socketserver.TCPServer):
@@ -1158,6 +1177,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
