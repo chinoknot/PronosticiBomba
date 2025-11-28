@@ -978,21 +978,37 @@ def sheetdb_append_rows(sheet_name, rows):
         print(f"# SheetDB: nessuna riga da inviare per sheet={sheet_name}", file=sys.stderr)
         return
 
+    BATCH_SIZE = 60  # puoi alzare/abbassare se vuoi
+
     try:
-        # Usiamo l'endpoint base + parametro sheet
-        params = {"sheet": sheet_name}
-        payload = {"data": rows}
+        total = len(rows)
+        print(f"# SheetDB: invio {total} righe in batch su sheet={sheet_name}", file=sys.stderr)
 
-        print(f"# SheetDB: POST -> {SHEETDB_URL} sheet={sheet_name} rows={len(rows)}", file=sys.stderr)
-        r = requests.post(SHEETDB_URL, params=params, json=payload, timeout=30)
+        for i in range(0, total, BATCH_SIZE):
+            batch = rows[i:i + BATCH_SIZE]
+            params = {"sheet": sheet_name}
+            payload = {"data": batch}
 
-        print(
-            f"# SheetDB: risposta sheet={sheet_name} "
-            f"status={r.status_code} body={r.text[:300]}",
-            file=sys.stderr,
-        )
+            print(
+                f"# SheetDB: POST -> {SHEETDB_URL} sheet={sheet_name} "
+                f"batch {i}–{i+len(batch)-1} (size={len(batch)})",
+                file=sys.stderr,
+            )
+
+            r = requests.post(SHEETDB_URL, params=params, json=payload, timeout=30)
+
+            print(
+                f"# SheetDB: risposta sheet={sheet_name} "
+                f"status={r.status_code} body={r.text[:200]}",
+                file=sys.stderr,
+            )
+
+            # piccolo delay per non martellare
+            time.sleep(0.2)
+
     except Exception as e:
         print(f"# ERRORE SheetDB append sheet={sheet_name}: {e}", file=sys.stderr)
+
 
 
 
@@ -1177,6 +1193,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
