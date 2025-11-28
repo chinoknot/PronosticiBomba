@@ -1202,6 +1202,25 @@ def start_pipeline_async():
     t.start()
     return True
 
+def start_results_checker_async(date_str=None):
+    """
+    Lancia il result checker (results_checker.py) in background,
+    importando la funzione run_results_checker dal file separato.
+    """
+    def _worker():
+        try:
+            from results_checker import run_results_checker
+            print(f"# Avvio results_checker per data={date_str}", file=sys.stderr)
+            run_results_checker(date_str)
+            print("# results_checker completato", file=sys.stderr)
+        except Exception as e:
+            print(f"# ERRORE in results_checker: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return True
+
+
 
 # ==========================
 # HTTP SERVER PER RENDER
@@ -1212,15 +1231,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query or "")
 
-        # segreto configurato via env
         secret_conf = os.environ.get("RUN_SECRET", "")
 
+        # ------------------------------
+        # /run -> avvia pipeline scraper
+        # ------------------------------
         if parsed.path == "/run":
-            # se è configurato un secret, lo richiediamo
             if secret_conf:
                 key = qs.get("key", [""])[0]
                 if key != secret_conf:
-                    # accesso non autorizzato
                     self.send_response(403)
                     self.send_header("Content-type", "text/plain; charset=utf-8")
                     self.end_headers()
@@ -1240,9 +1259,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(text.encode("utf-8"))
+            return
 
+        # -----------------------------------
+        # /check_results -> lancia result checker
+        # -----------------------------------
+        elif parsed.path == "/check_results":
+            if secret_conf:
+                key = qs.get("key", [""])[0]
+                if key != secret_conf:
+                    self.send_response(403)
+                    self.send_header("Content-type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Forbidden\n")
+                    return
+
+            # opzionale: ?date=YYYY-MM-DD
+            date_param = qs.get("date", [None])[0]
+            start_results_checker_async(date_param)
+
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Results checker avviato in background")
+            return
+
+        # ------------------------------
+        # qualsiasi altra path -> OK
+        # ------------------------------
         else:
-            # endpoint di healthcheck semplice
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -1251,6 +1296,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # niente log HTTP rumorosi
         pass
+
 
 
 
@@ -1267,6 +1313,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
