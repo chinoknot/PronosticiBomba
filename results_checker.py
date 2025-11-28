@@ -62,19 +62,23 @@ def to_float(x):
 
 def sheetdb_get_picks_for_date(date_str):
     """
-    Legge le righe da sheet=PICKS filtrando per date=YYYY-MM-DD
+    Legge tutte le righe da sheet=PICKS e filtra per run_date = date_str.
+    Evitiamo l'endpoint /search che sta dando 404.
     """
-    url = f"{SHEETDB_URL}/search"
+    url = SHEETDB_URL
     params = {
         "sheet": "PICKS",
-        "date": date_str,
     }
-    print(f"# SheetDB: GET picks date={date_str}", file=sys.stderr)
+    print(f"# SheetDB: GET tutti i picks (poi filtro per run_date={date_str})", file=sys.stderr)
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
-    print(f"# SheetDB: trovate {len(data)} righe in PICKS per {date_str}", file=sys.stderr)
-    return data
+
+    # Filtra lato client
+    filtered = [row for row in data if (row.get("run_date") or "").strip() == date_str]
+    print(f"# SheetDB: trovate {len(filtered)} righe in PICKS per run_date={date_str}", file=sys.stderr)
+    return filtered
+
 
 
 def sheetdb_append_rows(sheet_name, rows):
