@@ -459,305 +459,295 @@ def build_rows_for_date(target_date):
 # MODELLI & PICKS
 # ==========================
 
-def is_women_league(league_name: str) -> bool:
-    if not league_name:
-        return False
-    n = league_name.lower()
-    keywords = [
-        "women", "femin", "femen", "femmin", "ladies", "girls", "w-league"
-    ]
-    return any(k in n for k in keywords)
-
-
-def is_u17_league(league_name: str) -> bool:
-    if not league_name:
-        return False
-    n = league_name.lower()
-    return ("u17" in n) or ("u-17" in n) or ("under 17" in n)
-
-
-def is_u19_allowed(league_name: str) -> bool:
+def is_valid_competition(row):
     """
-    U19 sono permesse solo se si tratta di coppe europee tipo Youth League.
-    """
-    if not league_name:
-        return True
-    n = league_name.lower()
-    is_u19 = ("u19" in n) or ("u-19" in n) or ("under 19" in n)
-    if not is_u19:
-        return True
-    # consentiamo solo Youth League / UEFA Youth League
-    if ("youth league" in n) or ("uefa" in n):
-        return True
-    return False
-
-
-def is_national_cup(league_name: str) -> bool:
-    """
-    Esclude coppe nazionali (FA Cup, Coppa Italia, Taça, Pokal, ecc.)
-    ma NON esclude coppe europee (UEFA Champions League, Europa League, Conference, Youth League).
-    """
-    if not league_name:
-        return False
-    n = league_name.lower()
-
-    # se è chiaramente coppa europea, NON escludere
-    european_keywords = [
-        "uefa",
-        "champions league",
-        "europa league",
-        "conference league",
-        "youth league"
-    ]
-    if any(k in n for k in european_keywords):
-        return False
-
-    cup_keywords = [
-        "cup",
-        "copa",
-        "coppa",
-        "taça",
-        "taca",
-        "pokal",
-        "trophy",
-        "shield",
-        "super cup",
-        "supercup",
-        "supercoppa",
-    ]
-    return any(k in n for k in cup_keywords)
-
-
-def skip_competition(row: dict) -> bool:
-    """
-    True se la partita va esclusa a priori dai modelli:
-    - competizioni femminili
+    Filtra fuori:
+    - calcio femminile
     - U17
-    - U19 non-europee
-    - coppe nazionali
+    - amichevoli
+    - coppe nazionali (FA Cup, Coppa Italia, ecc.)
+      ma NON esclude Champions / Europa / Libertadores ecc.
     """
-    league_name = (row.get("league_name") or "")
-    if is_women_league(league_name):
-        return True
-    if is_u17_league(league_name):
-        return True
-    if not is_u19_allowed(league_name):
-        return True
-    if is_national_cup(league_name):
-        return True
-    return False
+    lname = (row.get("league_name") or "").lower()
+    rnd = (row.get("round") or "").lower()
+
+    # Femminile
+    women_tokens = ["women", "feminine", "femenina", "femminile", "fem."]
+    if any(tok in lname for tok in women_tokens):
+        return False
+
+    # U17
+    u17_tokens = ["u17", "u-17", "under 17"]
+    if any(tok in lname for tok in u17_tokens) or any(tok in rnd for tok in u17_tokens):
+        return False
+
+    # Amichevoli
+    friendly_tokens = ["friendly", "friendlies", "amic", "club friend"]
+    if any(tok in lname for tok in friendly_tokens):
+        return False
+
+    # Coppe nazionali
+    # Esempi: FA Cup, Coppa Italia, Copa del Rey, Taça, Pokal...
+    cup_tokens = ["cup", "coppa", "copa", "taça", "pokal", "coupe", "taça", "杯"]
+    # Competizioni che NON vogliamo escludere anche se contengono "cup"
+    keep_if_contains = [
+        "champions",         # Champions League
+        "libertadores",
+        "sudamericana",
+        "confederations",
+        "afc champions",
+        "ucl", "uel", "uecl"
+    ]
+    if any(tok in lname for tok in cup_tokens) and not any(k in lname for k in keep_if_contains):
+        return False
+
+    return True
+
+
+def form_score(form_str, window=5):
+    """
+    Converte la stringa di forma (es. 'WWLWD') in un punteggio.
+    W=3, D=1, L=0 sugli ultimi N match.
+    """
+    if not form_str:
+        return 0
+    s = str(form_str).strip().upper()
+    s = s[-window:]
+    score = 0
+    for ch in s:
+        if ch == "W":
+            score += 3
+        elif ch == "D":
+            score += 1
+    return score
+
+
+def poisson_pmf(k, lam):
+    if lam is None or lam <= 0:
+        return 0.0
+    return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+
+def prob_goals_at_least(lam, min_goals, max_goals=10):
+    """
+    P(TotGol >= min_goals) con Poisson(lam), tagliata a max_goals.
+    """
+    if lam is None or lam <= 0:
+        return 0.0
+    p_leq = 0.0
+    for k in range(0, min_goals):
+        p_leq += poisson_pmf(k, lam)
+    return max(0.0, 1.0 - p_leq)
+
+
+def estimate_lambdas(row):
+    """
+    Stima λ_home e λ_away usando:
+    - prediction_goals_home/away
+    - medie gol fatte/subite (home/away)
+    """
+    gh_pred = to_float(row.get("prediction_goals_home")) or 0.0
+    ga_pred = to_float(row.get("prediction_goals_away")) or 0.0
+
+    vals_h = []
+    vals_a = []
+
+    if gh_pred > 0:
+        vals_h.append(gh_pred)
+    if ga_pred > 0:
+        vals_a.append(ga_pred)
+
+    # medie gol a favore / contro
+    h_gf_home = to_float(row.get("home_goals_for_avg_home"))
+    h_ga_home = to_float(row.get("home_goals_against_avg_home"))
+    a_gf_away = to_float(row.get("away_goals_for_avg_away"))
+    a_ga_away = to_float(row.get("away_goals_against_avg_away"))
+
+    if h_gf_home:
+        vals_h.append(h_gf_home)
+    if a_ga_away:
+        vals_h.append(a_ga_away)   # gol concessi in trasferta dall'avversaria
+
+    if a_gf_away:
+        vals_a.append(a_gf_away)
+    if h_ga_home:
+        vals_a.append(h_ga_home)   # gol concessi in casa dall'avversaria
+
+    lam_h = sum(vals_h) / len(vals_h) if vals_h else 1.2
+    lam_a = sum(vals_a) / len(vals_a) if vals_a else 1.0
+    return lam_h, lam_a
 
 
 def generate_picks(rows):
     picks = []
-
     MIN_ODD = 1.20
-    VALUE_THRESHOLD_PCT = 1.5  # soglia value generale
-    BTTS_VALUE_THRESHOLD = 0.5  # soglia value più morbida per BTTS
-
-    def compute_value(model_prob_pct, odd):
-        """
-        model_prob_pct: probabilità stimata dal modello (0-100)
-        odd: quota decimale
-        Ritorna (value_pct, value_float) dove:
-          - value_pct = model_prob_pct - implied_prob_pct
-          - value_float = value_pct / 100
-        """
-        if model_prob_pct is None:
-            return None, None
-        ip = implied_prob(odd)
-        if ip is None:
-            return None, None
-        value_pct = model_prob_pct - ip
-        return value_pct, value_pct / 100.0
-
-    def avg2(a, b):
-        xs = [v for v in [a, b] if v is not None]
-        return sum(xs) / len(xs) if xs else None
 
     for r in rows:
-        # ESCLUSIONI (donne, coppe nazionali, U17, U19 non-europee)
-        if skip_competition(r):
-            continue
-
         try:
+            if not is_valid_competition(r):
+                continue
+
             fixture_id = r["fixture_id"]
             league = r["league_name"]
             home = r["home_team"]
             away = r["away_team"]
 
-            # Prob API (%)
-            prob_home = to_float(r["prob_home"])
-            prob_draw = to_float(r["prob_draw"])
-            prob_away = to_float(r["prob_away"])
+            # Probabilità previste API-Football (in %)
+            prob_home_pct = to_float(r.get("prob_home"))
+            prob_draw_pct = to_float(r.get("prob_draw"))
+            prob_away_pct = to_float(r.get("prob_away"))
 
-            # Gol previsti da prediction
-            gh = to_float(r["prediction_goals_home"]) or 0.0
-            ga = to_float(r["prediction_goals_away"]) or 0.0
-            exp_goals_pred = gh + ga
+            prob_home = (prob_home_pct or 0.0) / 100.0
+            prob_draw = (prob_draw_pct or 0.0) / 100.0
+            prob_away = (prob_away_pct or 0.0) / 100.0
 
-            # Odds
-            oh = to_float(r["odd_home"])
-            od = to_float(r["odd_draw"])
-            oa = to_float(r["odd_away"])
-            o_o15 = to_float(r["odd_ou_1_5_over"])
-            o_o25 = to_float(r["odd_ou_2_5_over"])
-            o_u25 = to_float(r["odd_ou_2_5_under"])
-            o_o35 = to_float(r["odd_ou_3_5_over"])
-            o_btts_y = to_float(r["odd_btts_yes"])
-            o_btts_n = to_float(r["odd_btts_no"])
+            # λ stimati + exp_goals
+            lam_h, lam_a = estimate_lambdas(r)
+            lam_total = lam_h + lam_a
 
-            # Under/over storici
-            home_ou15_for = to_float(r.get("home_ou_1_5_for_over")) or 0.0
-            home_ou15_against = to_float(r.get("home_ou_1_5_against_over")) or 0.0
-            away_ou15_for = to_float(r.get("away_ou_1_5_for_over")) or 0.0
-            away_ou15_against = to_float(r.get("away_ou_1_5_against_over")) or 0.0
+            # Odds principali
+            oh = to_float(r.get("odd_home"))
+            od = to_float(r.get("odd_draw"))
+            oa = to_float(r.get("odd_away"))
 
-            home_ou25_for = to_float(r.get("home_ou_2_5_for_over")) or 0.0
-            home_ou25_against = to_float(r.get("home_ou_2_5_against_over")) or 0.0
-            away_ou25_for = to_float(r.get("away_ou_2_5_for_over")) or 0.0
-            away_ou25_against = to_float(r.get("away_ou_2_5_against_over")) or 0.0
+            o_o15 = to_float(r.get("odd_ou_1_5_over"))
+            o_o25 = to_float(r.get("odd_ou_2_5_over"))
+            o_u25 = to_float(r.get("odd_ou_2_5_under"))  # non lo usiamo, ma lo leggo comunque
+            o_o35 = to_float(r.get("odd_ou_3_5_over"))
+            o_btts_y = to_float(r.get("odd_btts_yes"))
+            o_btts_n = to_float(r.get("odd_btts_no"))
 
-            # Partite giocate
-            home_games = (to_float(r["home_fixtures_played_home"]) or 0) + (to_float(r["home_fixtures_played_away"]) or 0)
-            away_games = (to_float(r["away_fixtures_played_home"]) or 0) + (to_float(r["away_fixtures_played_away"]) or 0)
-            tot_games = home_games + away_games if home_games and away_games else max(home_games, away_games, 1)
+            # Over 1.5 rate dai dati under/over
+            home_over15_for = to_float(r.get("home_ou_1_5_for_over")) or 0.0
+            home_over15_against = to_float(r.get("home_ou_1_5_against_over")) or 0.0
+            away_over15_for = to_float(r.get("away_ou_1_5_for_over")) or 0.0
+            away_over15_against = to_float(r.get("away_ou_1_5_against_over")) or 0.0
 
-            over15_cnt = home_ou15_for + home_ou15_against + away_ou15_for + away_ou15_against
-            over25_cnt = home_ou25_for + home_ou25_against + away_ou25_for + away_ou25_against
-            over15_rate = safe_div(over15_cnt, tot_games)
-            over25_rate = safe_div(over25_cnt, tot_games)
+            home_games = (to_float(r.get("home_fixtures_played_home")) or 0.0) + \
+                         (to_float(r.get("home_fixtures_played_away")) or 0.0)
+            away_games = (to_float(r.get("away_fixtures_played_home")) or 0.0) + \
+                         (to_float(r.get("away_fixtures_played_away")) or 0.0)
+            tot_games = home_games + away_games if home_games and away_games else max(home_games, away_games, 1.0)
+
+            over15_count = home_over15_for + home_over15_against + away_over15_for + away_over15_against
+            over15_rate = safe_div(over15_count, tot_games)  # tra 0 e >1, lo clampiamo dopo
+
+            if over15_rate > 1:
+                over15_rate = 1.0
+
+            # Forma squadre
+            home_form = form_score(r.get("home_form"))
+            away_form = form_score(r.get("away_form"))
 
             # Medie gol
-            h_for_h = to_float(r.get("home_goals_for_avg_home"))
-            h_for_a = to_float(r.get("home_goals_for_avg_away"))
-            a_for_h = to_float(r.get("away_goals_for_avg_home"))
-            a_for_a = to_float(r.get("away_goals_for_avg_away"))
+            h_gf_home = to_float(r.get("home_goals_for_avg_home")) or 0.0
+            h_ga_home = to_float(r.get("home_goals_against_avg_home")) or 0.0
+            a_gf_away = to_float(r.get("away_goals_for_avg_away")) or 0.0
+            a_ga_away = to_float(r.get("away_goals_against_avg_away")) or 0.0
 
-            h_ag_h = to_float(r.get("home_goals_against_avg_home"))
-            h_ag_a = to_float(r.get("home_goals_against_avg_away"))
-            a_ag_h = to_float(r.get("away_goals_against_avg_home"))
-            a_ag_a = to_float(r.get("away_goals_against_avg_away"))
+            # Poisson: probabilità sugli over
+            p_over15 = prob_goals_at_least(lam_total, 2)
+            p_over25 = prob_goals_at_least(lam_total, 3)
+            p_over35 = prob_goals_at_least(lam_total, 4)
 
-            home_for_avg = avg2(h_for_h, h_for_a) or 0.0
-            away_for_avg = avg2(a_for_h, a_for_a) or 0.0
-            home_against_avg = avg2(h_ag_h, h_ag_a) or 0.0
-            away_against_avg = avg2(a_ag_h, a_ag_a) or 0.0
+            # Probabilità BTTS con Poisson
+            # P(BTTS) = 1 - P(H=0) - P(A=0) + P(H=0)*P(A=0)
+            p_h0 = math.exp(-lam_h) if lam_h > 0 else 1.0
+            p_a0 = math.exp(-lam_a) if lam_a > 0 else 1.0
+            p_btts = 1.0 - p_h0 - p_a0 + p_h0 * p_a0
+            p_btts = max(0.0, min(1.0, p_btts))
 
-            # streak & forma
-            home_streak_wins = to_float(r.get("home_streak_wins")) or 0.0
-            home_streak_loses = to_float(r.get("home_streak_loses")) or 0.0
-            away_streak_wins = to_float(r.get("away_streak_wins")) or 0.0
-            away_streak_loses = to_float(r.get("away_streak_loses")) or 0.0
-            home_form = (r.get("home_form") or "")
-            away_form = (r.get("away_form") or "")
+            # ---------- MODELLI OVER / BTTS ----------
 
-            # exp_goals generico
-            exp_goals = exp_goals_pred
-            if exp_goals <= 0:
-                exp_goals = (home_for_avg + away_for_avg + home_against_avg + away_against_avg) / 2.0
+            # O1.5 SAFE (rimane la base "sicura")
+            if o_o15 and 1.20 <= o_o15 <= 1.40:
+                if lam_total >= 1.9 and over15_rate >= 0.70 and p_over15 >= 0.80:
+                    p_imp = 1.0 / o_o15
+                    prob_model = max(p_over15, over15_rate)
+                    value = max(0.0, prob_model - p_imp)
+                    score = value + (prob_model - 0.80) + (over15_rate - 0.70)
 
-            # ==========================
-            # 1) BASE: O1.5 SAFE (già buono)
-            # ==========================
-            if o_o15 and MIN_ODD <= o_o15 <= 1.65 and exp_goals >= 1.9 and over15_rate >= 0.6:
-                prob_model = min(97, over15_rate * 100 + max(0, exp_goals - 2.0) * 15)
-                value_pct, value = compute_value(prob_model, o_o15)
-                score = (value or 0) + (over15_rate - 0.6) + max(0, exp_goals - 1.9)
-                picks.append({
-                    "model": "O1_5_SAFE",
-                    "category": "OVER_UNDER_TIPS",
-                    "fixture_id": fixture_id,
-                    "league": league,
-                    "home": home,
-                    "away": away,
-                    "pick": "Over 1.5 goals",
-                    "odd": o_o15,
-                    "score": score,
-                })
-
-            # ==========================
-            # 2) OVER 2.5 potenziati
-            # ==========================
-
-            # O2.5_STRONG (più selettivo)
-            if o_o25 and 1.45 <= o_o25 <= 2.40 and exp_goals >= 2.5:
-                prob_model = min(96, exp_goals * 28 + (over25_rate * 35))
-                value_pct, value = compute_value(prob_model, o_o25)
-                if value_pct is not None and value_pct >= VALUE_THRESHOLD_PCT:
-                    score = (value or 0) + max(0, exp_goals - 2.5) + max(0, over25_rate - 0.5)
                     picks.append({
-                        "model": "O2_5_STRONG",
-                        "category": "OVER_UNDER_TIPS",
+                        "model": "O1_5_SAFE",
+                        "category": "SAFE_PICKS",
                         "fixture_id": fixture_id,
                         "league": league,
                         "home": home,
                         "away": away,
-                        "pick": "Over 2.5 goals",
-                        "odd": o_o25,
+                        "pick": "Over 1.5 goals",
+                        "odd": o_o15,
                         "score": score,
                     })
 
-            # O2.5_SAFE (nuovo, più numeroso)
-            if o_o25 and 1.35 <= o_o25 <= 2.10 and exp_goals >= 2.4 and over25_rate >= 0.55:
-                prob_model = min(96, exp_goals * 26 + over25_rate * 40)
-                value_pct, value = compute_value(prob_model, o_o25)
-                # per questa variante abbassiamo un po' la soglia value
-                if value_pct is not None and value_pct >= 0.8:
-                    score = (value or 0) + max(0, exp_goals - 2.4) + max(0, over25_rate - 0.55)
-                    picks.append({
-                        "model": "O2_5_SAFE",
-                        "category": "OVER_UNDER_TIPS",
-                        "fixture_id": fixture_id,
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "pick": "Over 2.5 goals (safe)",
-                        "odd": o_o25,
-                        "score": score,
-                    })
+            # O1.5 VALUE (quote un po' più alte, 1.35–1.60)
+            if o_o15 and 1.35 <= o_o15 <= 1.60:
+                if lam_total >= 2.1 and over15_rate >= 0.65 and p_over15 >= 0.75:
+                    p_imp = 1.0 / o_o15
+                    prob_model = max(p_over15, over15_rate)
+                    value = prob_model - p_imp
+                    if value > 0.05:  # almeno +5 punti di value
+                        score = value + (prob_model - 0.75) + (lam_total - 2.1) * 0.1
 
-            # ==========================
-            # 3) OVER 3.5 potenziati
-            # ==========================
-            if o_o35 and 1.60 <= o_o35 <= 3.50 and exp_goals >= 3.0:
-                prob_model = min(96, exp_goals * 25 + over25_rate * 20)
-                value_pct, value = compute_value(prob_model, o_o35)
-                # vogliamo più proposte, soglia un po' più morbida
-                if value_pct is not None and value_pct >= 0.8:
-                    score = (value or 0) + max(0, exp_goals - 3.0)
-                    picks.append({
-                        "model": "O3_5_STRONG",
-                        "category": "OVER_UNDER_TIPS",
-                        "fixture_id": fixture_id,
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "pick": "Over 3.5 goals",
-                        "odd": o_o35,
-                        "score": score,
-                    })
+                        picks.append({
+                            "model": "O1_5_VALUE",
+                            "category": "OVER_UNDER_TIPS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Over 1.5 goals",
+                            "odd": o_o15,
+                            "score": score,
+                        })
 
-            # ==========================
-            # 4) BTTS YES / NO più generosi
-            # ==========================
+            # O2.5 VALUE
+            if o_o25 and 1.60 <= o_o25 <= 2.20:
+                if lam_total >= 2.5 and p_over25 >= 0.55:
+                    p_imp = 1.0 / o_o25
+                    prob_model = p_over25
+                    value = prob_model - p_imp
+                    if value > 0.04:
+                        score = value + (prob_model - 0.55) + (lam_total - 2.5) * 0.1
+                        picks.append({
+                            "model": "O2_5_VALUE",
+                            "category": "OVER_UNDER_TIPS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Over 2.5 goals",
+                            "odd": o_o25,
+                            "score": score,
+                        })
 
-            # BTTS_YES_STRONG
-            if o_btts_y and 1.30 <= o_btts_y <= 2.60:
-                cond_attack = (home_for_avg >= 1.0 and away_for_avg >= 1.0)
-                cond_def = (home_against_avg >= 0.9 and away_against_avg >= 0.9)
-                cond_goals = exp_goals >= 2.4 or (gh + ga) >= 1.8
+            # O3.5 HIGH RISK
+            if o_o35 and 1.90 <= o_o35 <= 3.00:
+                if lam_total >= 3.1 and p_over35 >= 0.35:
+                    p_imp = 1.0 / o_o35
+                    prob_model = p_over35
+                    value = prob_model - p_imp
+                    if value > 0.0:
+                        score = value + (prob_model - 0.35) + (lam_total - 3.1) * 0.1
+                        picks.append({
+                            "model": "O3_5_HIGH_RISK",
+                            "category": "OVER_UNDER_TIPS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Over 3.5 goals",
+                            "odd": o_o35,
+                            "score": score,
+                        })
 
-                if cond_attack and cond_def and cond_goals:
-                    prob_model = min(
-                        96,
-                        (home_for_avg + away_for_avg) * 20
-                        + (home_against_avg + away_against_avg) * 15
-                        + exp_goals * 10
-                    )
-                    value_pct, value = compute_value(prob_model, o_btts_y)
-                    if value_pct is not None and value_pct >= BTTS_VALUE_THRESHOLD:
-                        score = (value or 0) + max(0, exp_goals - 2.4)
+            # BTTS YES STRONG
+            if o_btts_y and 1.50 <= o_btts_y <= 2.00:
+                if p_btts >= 0.60 and lam_h >= 0.9 and lam_a >= 0.9:
+                    p_imp = 1.0 / o_btts_y
+                    prob_model = p_btts
+                    value = prob_model - p_imp
+                    if value > 0.03:
+                        score = value + (prob_model - 0.60) + (lam_h - 0.9) * 0.05 + (lam_a - 0.9) * 0.05
                         picks.append({
                             "model": "BTTS_YES_STRONG",
                             "category": "OVER_UNDER_TIPS",
@@ -765,229 +755,231 @@ def generate_picks(rows):
                             "league": league,
                             "home": home,
                             "away": away,
-                            "pick": "Both teams score YES",
+                            "pick": "Both teams to score YES",
                             "odd": o_btts_y,
                             "score": score,
                         })
 
-            # BTTS_NO_STRONG (lasciamo, ma rimane più raro)
-            if o_btts_n and 1.40 <= o_btts_n <= 2.50:
-                cond_attack_low = (home_for_avg <= 1.3 or away_for_avg <= 1.3)
-                cond_def_solid = (home_against_avg <= 1.0 or away_against_avg <= 1.0)
-                if cond_attack_low and cond_def_solid and exp_goals <= 2.3:
-                    prob_model = max(
-                        35,
-                        100
-                        - (home_for_avg + away_for_avg) * 20
-                        - exp_goals * 10,
-                    )
-                    value_pct, value = compute_value(prob_model, o_btts_n)
-                    if value_pct is not None and value_pct >= BTTS_VALUE_THRESHOLD:
-                        score = (value or 0) + max(0, 2.3 - exp_goals)
+            # BTTS YES VALUE (quote un po' più alte)
+            if o_btts_y and 1.70 <= o_btts_y <= 2.20:
+                if p_btts >= 0.55 and lam_total >= 2.4:
+                    p_imp = 1.0 / o_btts_y
+                    prob_model = p_btts
+                    value = prob_model - p_imp
+                    if value > 0.04:
+                        score = value + (prob_model - 0.55) + (lam_total - 2.4) * 0.1
                         picks.append({
-                            "model": "BTTS_NO_STRONG",
+                            "model": "BTTS_YES_VALUE",
                             "category": "OVER_UNDER_TIPS",
                             "fixture_id": fixture_id,
                             "league": league,
                             "home": home,
                             "away": away,
-                            "pick": "Both teams score NO",
+                            "pick": "Both teams to score YES",
+                            "odd": o_btts_y,
+                            "score": score,
+                        })
+
+            # Eventuale BTTS NO strong (solo se proprio chiuso)
+            if o_btts_n and 1.50 <= o_btts_n <= 2.20:
+                if p_btts <= 0.35 and lam_total <= 2.0:
+                    p_imp = 1.0 / o_btts_n
+                    prob_model = 1.0 - p_btts
+                    value = prob_model - p_imp
+                    if value > 0.03:
+                        score = value + ((1.0 - p_btts) - 0.65) + (2.0 - lam_total) * 0.1
+                        picks.append({
+                            "model": "BTTS_NO_STATS",
+                            "category": "OVER_UNDER_TIPS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Both teams to score NO",
                             "odd": o_btts_n,
                             "score": score,
                         })
 
-            # ==========================
-            # 5) STRONG HOME WIN (stats & forma)
-            # ==========================
+            # ---------- MODELLI 1X2 / COMBO ----------
 
-            # modello nuovo, poco basato su odds
-            if oh and oh >= 1.40:
-                # forma: W = +2, D = +1, L = -2
-                def form_score(fs: str) -> float:
-                    score = 0
-                    for ch in fs.upper():
-                        if ch == "W":
-                            score += 2
-                        elif ch == "D":
-                            score += 1
-                        elif ch == "L":
-                            score -= 2
-                    return score
+            # Indici "forza"
+            home_strength = (h_gf_home - h_ga_home)
+            away_strength = (a_gf_away - a_ga_away)
 
-                home_form_score = form_score(home_form)
-                away_form_score = form_score(away_form)
-
-                # condizioni per "forte" squilibrio
-                cond_form = home_form_score >= 4 and (home_form_score - away_form_score) >= 3
-                cond_streak = home_streak_wins >= 2 or away_streak_loses >= 2
-                cond_goals_for = home_for_avg >= 1.5
-                cond_goals_def = away_against_avg >= 1.3
-
-                if cond_form and cond_streak and cond_goals_for and cond_goals_def:
-                    # non uso value, ma una score interna basata su forma+streak+medie gol
-                    base_score = (
-                        (home_form_score - away_form_score) * 0.1
-                        + home_streak_wins * 0.3
-                        + max(0, away_streak_loses - 1) * 0.2
-                        + max(0, home_for_avg - 1.2)
-                        + max(0, away_against_avg - 1.0)
-                    )
-                    # se abbiamo la prob home del modello API, la usiamo solo per aumentare un po' la fiducia
-                    if prob_home:
-                        base_score += (prob_home - 50) / 200.0
-
-                    picks.append({
-                        "model": "HOME_WIN_FORM",
-                        "category": "BEST_TIPS_OF_DAY",
-                        "fixture_id": fixture_id,
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "pick": "Home wins (form & stats)",
-                        "odd": oh,
-                        "score": base_score,
-                    })
-
-            # ==========================
-            # 6) Doppie chances + MIX (resto dei modelli buoni)
-            # ==========================
-
-            # DC1X_SAFE
-            if oh and MIN_ODD <= oh <= 1.90 and prob_home and prob_draw:
-                prob1x = prob_home + prob_draw
-                if prob1x >= 70:
-                    value_pct, value = compute_value(prob1x, oh)
-                    q1x = max(1.25, min(1.65, oh * 0.65))
-                    score = (value or 0) + (prob1x - 70) / 100.0
-                    picks.append({
-                        "model": "DC1X_SAFE",
-                        "category": "SAFE_PICKS",
-                        "fixture_id": fixture_id,
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "pick": "1X",
-                        "odd": q1x,
-                        "score": score,
-                    })
-
-            # DCX2_SAFE
-            if oa and MIN_ODD <= oa <= 2.00 and prob_away and prob_draw:
-                probx2 = prob_away + prob_draw
-                if probx2 >= 70:
-                    value_pct, value = compute_value(probx2, oa)
-                    qx2 = max(1.25, min(1.75, oa * 0.65))
-                    score = (value or 0) + (probx2 - 70) / 100.0
-                    picks.append({
-                        "model": "DCX2_SAFE",
-                        "category": "SAFE_PICKS",
-                        "fixture_id": fixture_id,
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "pick": "X2",
-                        "odd": qx2,
-                        "score": score,
-                    })
-
-            # MIX_1X_O1_5
-            if o_o15 and oh and prob_home and prob_draw:
-                prob1x = prob_home + prob_draw
-                if prob1x >= 70 and exp_goals >= 1.9:
-                    q1x = max(1.25, min(1.65, oh * 0.65))
-                    q_mix = max(1.40, min(2.20, q1x * o_o15 * 0.7))
-                    prob_model = min(96, prob1x + (over15_rate * 20))
-                    value_pct, value = compute_value(prob_model, q_mix)
-                    if value_pct is not None and value_pct >= VALUE_THRESHOLD_PCT:
-                        score = (value or 0) + (prob1x - 70) / 100.0 + max(0, exp_goals - 2.0)
+            # HOME WIN STRONG basato su stats+forma
+            if oh and 1.40 <= oh <= 1.90 and prob_home > 0:
+                if prob_home >= 0.55 and (home_form - away_form) >= 3 and (home_strength - away_strength) >= 0.5 and lam_h > lam_a:
+                    p_imp = 1.0 / oh
+                    prob_model = prob_home
+                    value = prob_model - p_imp
+                    if value > 0.02:
+                        score = value + (prob_home - 0.55) + (home_form - away_form) * 0.02 + (home_strength - away_strength) * 0.1
                         picks.append({
-                            "model": "MIX_1X_O1_5",
-                            "category": "MIXED_TIPS",
+                            "model": "HOME_WIN_STRONG_STATS",
+                            "category": "BEST_TIPS_OF_DAY",
                             "fixture_id": fixture_id,
                             "league": league,
                             "home": home,
                             "away": away,
-                            "pick": "1X + Over 1.5 goals",
-                            "odd": q_mix,
+                            "pick": "Home wins",
+                            "odd": oh,
                             "score": score,
                         })
 
-            # MIX_X2_O1_5
-            if o_o15 and oa and prob_away and prob_draw:
-                probx2 = prob_away + prob_draw
-                if probx2 >= 70 and exp_goals >= 1.9:
-                    qx2 = max(1.25, min(1.75, oa * 0.65))
-                    q_mix = max(1.40, min(2.30, qx2 * o_o15 * 0.7))
-                    prob_model = min(96, probx2 + (over15_rate * 20))
-                    value_pct, value = compute_value(prob_model, q_mix)
-                    if value_pct is not None and value_pct >= VALUE_THRESHOLD_PCT:
-                        score = (value or 0) + (probx2 - 70) / 100.0 + max(0, exp_goals - 2.0)
+            # AWAY WIN STRONG (versione speculare)
+            if oa and 1.40 <= oa <= 2.20 and prob_away > 0:
+                if prob_away >= 0.55 and (away_form - home_form) >= 3 and (away_strength - home_strength) >= 0.5 and lam_a > lam_h:
+                    p_imp = 1.0 / oa
+                    prob_model = prob_away
+                    value = prob_model - p_imp
+                    if value > 0.02:
+                        score = value + (prob_away - 0.55) + (away_form - home_form) * 0.02 + (away_strength - home_strength) * 0.1
                         picks.append({
-                            "model": "MIX_X2_O1_5",
-                            "category": "MIXED_TIPS",
+                            "model": "AWAY_WIN_STRONG_STATS",
+                            "category": "BEST_TIPS_OF_DAY",
                             "fixture_id": fixture_id,
                             "league": league,
                             "home": home,
                             "away": away,
-                            "pick": "X2 + Over 1.5 goals",
-                            "odd": q_mix,
+                            "pick": "Away wins",
+                            "odd": oa,
                             "score": score,
                         })
 
-            # ==========================
-            # 7) VALUE BET basilari (1 & 2)
-            # ==========================
-
-            # VALUE_HOME
-            if oh and 1.40 <= oh <= 3.50 and prob_home:
-                value_pct, value = compute_value(prob_home, oh)
-                if value_pct is not None and value_pct >= VALUE_THRESHOLD_PCT:
-                    score = (value or 0) + (prob_home - 50) / 100.0
+            # VALUE BET HOME (quote 1.60–2.20 con buon value)
+            if oh and 1.60 <= oh <= 2.20 and prob_home > 0:
+                p_imp = 1.0 / oh
+                if prob_home - p_imp >= 0.07:  # almeno +7 punti percentuali
+                    value = prob_home - p_imp
+                    score = value + (prob_home - 0.55)
                     picks.append({
-                        "model": "VALUE_HOME",
-                        "category": "VALUE_TIPS",
+                        "model": "HOME_VALUE_BET",
+                        "category": "VALUE_PICKS",
                         "fixture_id": fixture_id,
                         "league": league,
                         "home": home,
                         "away": away,
-                        "pick": "Home wins (value)",
+                        "pick": "Home wins",
                         "odd": oh,
                         "score": score,
                     })
 
-            # VALUE_AWAY
-            if oa and 1.40 <= oa <= 3.50 and prob_away:
-                value_pct, value = compute_value(prob_away, oa)
-                if value_pct is not None and value_pct >= VALUE_THRESHOLD_PCT:
-                    score = (value or 0) + (prob_away - 50) / 100.0
+            # VALUE BET AWAY
+            if oa and 1.70 <= oa <= 2.40 and prob_away > 0:
+                p_imp = 1.0 / oa
+                if prob_away - p_imp >= 0.07:
+                    value = prob_away - p_imp
+                    score = value + (prob_away - 0.55)
                     picks.append({
-                        "model": "VALUE_AWAY",
-                        "category": "VALUE_TIPS",
+                        "model": "AWAY_VALUE_BET",
+                        "category": "VALUE_PICKS",
                         "fixture_id": fixture_id,
                         "league": league,
                         "home": home,
                         "away": away,
-                        "pick": "Away wins (value)",
+                        "pick": "Away wins",
                         "odd": oa,
                         "score": score,
                     })
+
+            # Double chance 1X + Over 1.5 (stima quota)
+            if prob_home > 0 and prob_draw > 0 and o_o15:
+                prob1x = prob_home + prob_draw
+                if prob1x >= 0.75 and p_over15 >= 0.75 and o_o15 >= MIN_ODD:
+                    # quota DC 1X stimata (più bassa dell'1)
+                    q1x_est = max(1.25, min(1.70, (oh or 1.50) * 0.65))
+                    # combo con O1.5 leggermente più alta
+                    q_combo = max(1.35, min(1.90, q1x_est * 1.10))
+                    p_imp = 1.0 / q_combo
+                    prob_model = min(0.99, prob1x * p_over15)
+                    value = prob_model - p_imp
+                    if value > 0.04:
+                        score = value + (prob_model - 0.70)
+                        picks.append({
+                            "model": "DC1X_O1_5_COMBO",
+                            "category": "SAFE_PICKS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "1X & Over 1.5 goals",
+                            "odd": q_combo,
+                            "score": score,
+                        })
+
+            # Double chance X2 + Over 1.5
+            if prob_away > 0 and prob_draw > 0 and o_o15:
+                probx2 = prob_away + prob_draw
+                if probx2 >= 0.75 and p_over15 >= 0.75 and o_o15 >= MIN_ODD:
+                    qx2_est = max(1.25, min(1.80, (oa or 1.70) * 0.65))
+                    q_combo = max(1.35, min(2.00, qx2_est * 1.10))
+                    p_imp = 1.0 / q_combo
+                    prob_model = min(0.99, probx2 * p_over15)
+                    value = prob_model - p_imp
+                    if value > 0.04:
+                        score = value + (prob_model - 0.70)
+                        picks.append({
+                            "model": "DCX2_O1_5_COMBO",
+                            "category": "SAFE_PICKS",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "X2 & Over 1.5 goals",
+                            "odd": q_combo,
+                            "score": score,
+                        })
+
+            # Winner + Over 1.5 (combo "virtuale")
+            if oh and o_o15 and prob_home > 0:
+                if oh >= 1.35 and p_over15 >= 0.75:
+                    # quota combo stimata (non reale, ma serve per ranking)
+                    q_combo = max(1.50, min(2.40, oh * 1.10))
+                    p_imp = 1.0 / q_combo
+                    prob_model = min(0.99, prob_home * p_over15)
+                    value = prob_model - p_imp
+                    if value > 0.03:
+                        score = value + (prob_model - 0.60)
+                        picks.append({
+                            "model": "HOME_WIN_O1_5_COMBO",
+                            "category": "BEST_TIPS_OF_DAY",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Home wins & Over 1.5 goals",
+                            "odd": q_combo,
+                            "score": score,
+                        })
+
+            if oa and o_o15 and prob_away > 0:
+                if oa >= 1.50 and p_over15 >= 0.75:
+                    q_combo = max(1.60, min(2.60, oa * 1.10))
+                    p_imp = 1.0 / q_combo
+                    prob_model = min(0.99, prob_away * p_over15)
+                    value = prob_model - p_imp
+                    if value > 0.03:
+                        score = value + (prob_model - 0.60)
+                        picks.append({
+                            "model": "AWAY_WIN_O1_5_COMBO",
+                            "category": "BEST_TIPS_OF_DAY",
+                            "fixture_id": fixture_id,
+                            "league": league,
+                            "home": home,
+                            "away": away,
+                            "pick": "Away wins & Over 1.5 goals",
+                            "odd": q_combo,
+                            "score": score,
+                        })
 
         except Exception as e:
             print("# ERR PICK", e, file=sys.stderr)
             continue
 
-    # Ordina tutte le picks per score decrescente
+    # ordiniamo per score decrescente
     picks.sort(key=lambda x: x["score"], reverse=True)
-
-    # Limite massimo di picks per non andare fuori scala
-    MAX_PICKS = 120
-    if len(picks) > MAX_PICKS:
-        picks = picks[:MAX_PICKS]
-
     print(f"# TOT picks candidate: {len(picks)}", file=sys.stderr)
     return picks
-
-
 
 
 def build_categories(picks):
@@ -999,19 +991,29 @@ def build_categories(picks):
         "OVER_UNDER_TIPS": [],
         "DAILY_2PLUS": [],
         "DAILY_10PLUS": [],
+        "VALUE_PICKS": [],
     }
 
+    # TOP 5 e BEST TIPS usano il ranking globale
     cats["TOP_5_TIPS"] = picks[:5]
     cats["BEST_TIPS_OF_DAY"] = picks[:15]
 
-    safe = [p for p in picks if p["category"] == "SAFE_PICKS" and 1.20 <= (p["odd"] or 0) <= 1.55]
-    cats["SAFE_PICKS"] = safe[:10]
+    # SAFE_PICKS: modelli marcati come SAFE_PICKS + quota contenuta
+    safe = [p for p in picks if p["category"] == "SAFE_PICKS" and 1.20 <= (p["odd"] or 0) <= 1.65]
+    cats["SAFE_PICKS"] = safe[:15]
 
-    ou = [p for p in picks if p["model"].startswith("O") or p["model"].startswith("U") or "BTTS" in p["model"]]
-    cats["OVER_UNDER_TIPS"] = ou[:15]
+    # OVER/UNDER TIPS
+    ou = [p for p in picks if p["category"] == "OVER_UNDER_TIPS"]
+    cats["OVER_UNDER_TIPS"] = ou[:25]
 
+    # VALUE_PICKS
+    val = [p for p in picks if p["category"] == "VALUE_PICKS"]
+    cats["VALUE_PICKS"] = val[:20]
+
+    # SINGLE GAME: la miglior pick in assoluto
     cats["SINGLE_GAME"] = picks[:1]
 
+    # DAILY 2+ODDS: selezione di SAFE con prodotto ~2
     ticket = []
     prod = 1.0
     for p in safe:
@@ -1022,10 +1024,11 @@ def build_categories(picks):
             break
     cats["DAILY_2PLUS"] = ticket
 
+    # DAILY 10+ODDS: picks a quota medio-bassa, ma da combinare
     ticket10 = []
     prod10 = 1.0
     for p in picks:
-        if 1.30 <= (p["odd"] or 0) <= 1.80:
+        if 1.30 <= (p["odd"] or 0) <= 1.90:
             ticket10.append(p)
             prod10 *= p["odd"]
         if prod10 >= 10.0:
@@ -1033,6 +1036,7 @@ def build_categories(picks):
     cats["DAILY_10PLUS"] = ticket10
 
     return cats
+
 
 
 # ==========================
@@ -1313,6 +1317,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
