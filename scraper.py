@@ -29,6 +29,25 @@ TZ = timezone.utc
 RUN_MARKER_PATH = "/tmp/last_run_marker.txt"
 TEAM_STATS_CACHE = {}
 
+# Finestra oraria in formato HH:MM (timezone Europe/Dublin già usata nella chiamata fixtures)
+TIME_MIN = "11:30"
+TIME_MAX = "20:30"
+
+# Paesi africani da escludere sempre
+AFRICAN_COUNTRIES = {
+    "algeria","angola","benin","botswana","burkina faso","burundi",
+    "cameroon","cape verde","central african republic","chad",
+    "comoros","congo","congo dr","dr congo","cote d'ivoire","ivory coast",
+    "djibouti","egypt","equatorial guinea","eritrea","eswatini","swaziland",
+    "ethiopia","gabon","gambia","ghana","guinea","guinea-bissau",
+    "kenya","lesotho","liberia","libya","madagascar","malawi","mali",
+    "mauritania","mauritius","morocco","mozambique","namibia","niger",
+    "nigeria","rwanda","sao tome and principe","senegal","seychelles",
+    "sierra leone","somalia","south africa","south sudan","sudan",
+    "tanzania","togo","tunisia","uganda","zambia","zimbabwe"
+}
+
+
 
 # ==========================
 # UTILS
@@ -367,17 +386,44 @@ def build_rows_for_date(target_date):
     fixtures = get_fixtures_for_date(target_date)
     rows = []
 
-    for f in fixtures:
+    total = len(fixtures)
+    print(f"# Fixtures totali (grezzi) per {target_date}: {total}", file=sys.stderr)
+
+    processed = 0
+
+    for idx, f in enumerate(fixtures, start=1):
         fixture_id = ""
+
         try:
-            fx = f.get("fixture", {})
-            league = f.get("league", {})
-            teams = f.get("teams", {})
+            fx = f.get("fixture", {}) or {}
+            league = f.get("league", {}) or {}
+            teams = f.get("teams", {}) or {}
 
             fixture_id = fx.get("id", "")
-            dateiso = fx.get("date", "")
+
+            # --------------------------
+            # FILTRI PRE-SCRAPING
+            # --------------------------
+            # 1) filtro per paese africano
+            country_name = (league.get("country") or "").strip().lower()
+            if country_name in AFRICAN_COUNTRIES:
+                continue
+
+            # 2) filtro per orario (11:30–20:30 Europe/Dublin)
+            #    La chiamata a /fixtures usa già timezone="Europe/Dublin"
+            dateiso = fx.get("date", "") or ""
+            # dateiso es. "2025-11-29T13:30:00+01:00"
             d = dateiso[:10] if len(dateiso) >= 10 else ""
             t = dateiso[11:16] if len(dateiso) >= 16 else ""
+
+            if t and (t < TIME_MIN or t > TIME_MAX):
+                # fuori finestra oraria → saltiamo tutta la partita
+                continue
+
+            # se manca l'orario per qualche motivo, la scartiamo per sicurezza
+            if not t:
+                continue
+
             status = fx.get("status", {}) or {}
             venue = fx.get("venue", {}) or {}
 
@@ -390,6 +436,11 @@ def build_rows_for_date(target_date):
 
             league_id = league.get("id")
             season = league.get("season")
+
+            # --------------------------
+            # QUI INIZIANO LE CALL PESANTI
+            # (solo se il match è passato i filtri)
+            # --------------------------
 
             pred = get_prediction_for_fixture(fixture_id)
             odds = get_odds_for_fixture(fixture_id)
@@ -443,16 +494,24 @@ def build_rows_for_date(target_date):
                 "odd_btts_yes": odds.get("odd_btts_yes", ""),
                 "odd_btts_no": odds.get("odd_btts_no", ""),
             }
+
             row.update(home_ts)
             row.update(away_ts)
 
             rows.append(row)
+            processed += 1
+
+            # log di progresso ogni 50 partite realmente elaborate
+            if processed % 50 == 0:
+                print(f"# Progress fixtures (filtrate): {processed}", file=sys.stderr)
 
         except Exception as e:
             print(f"# ERRORE fixture {fixture_id}: {e}", file=sys.stderr)
             continue
 
+    print(f"# Fixtures effettivamente elaborate dopo filtri: {processed}", file=sys.stderr)
     return rows
+
 
 
 # ==========================
@@ -1317,6 +1376,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
 
 
 
