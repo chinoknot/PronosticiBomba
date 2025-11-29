@@ -278,7 +278,7 @@ def get_team_statistics_raw(league_id, season, team_id):
     if key in TEAM_STATS_CACHE:
         return TEAM_STATS_CACHE[key]
 
-    url = f"{BASE_URL}/teams/statistics}"
+    url = f"{BASE_URL}/teams/statistics"
     params = {"league": league_id, "season": season, "team": team_id}
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=30)
@@ -1284,3 +1284,4 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
+
