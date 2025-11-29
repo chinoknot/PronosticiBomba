@@ -278,7 +278,7 @@ def get_team_statistics_raw(league_id, season, team_id):
     if key in TEAM_STATS_CACHE:
         return TEAM_STATS_CACHE[key]
 
-    url = f"{BASE_URL}/teams/statistics"
+    url = f"{BASE_URL}/teams/statistics}"
     params = {"league": league_id, "season": season, "team": team_id}
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=30)
@@ -410,17 +410,12 @@ def build_rows_for_date(target_date):
                 continue
 
             # 2) filtro per orario (11:30–20:30 Europe/Dublin)
-            #    La chiamata a /fixtures usa già timezone="Europe/Dublin"
             dateiso = fx.get("date", "") or ""
-            # dateiso es. "2025-11-29T13:30:00+01:00"
             d = dateiso[:10] if len(dateiso) >= 10 else ""
             t = dateiso[11:16] if len(dateiso) >= 16 else ""
 
             if t and (t < TIME_MIN or t > TIME_MAX):
-                # fuori finestra oraria → saltiamo tutta la partita
                 continue
-
-            # se manca l'orario per qualche motivo, la scartiamo per sicurezza
             if not t:
                 continue
 
@@ -439,7 +434,6 @@ def build_rows_for_date(target_date):
 
             # --------------------------
             # QUI INIZIANO LE CALL PESANTI
-            # (solo se il match è passato i filtri)
             # --------------------------
 
             pred = get_prediction_for_fixture(fixture_id)
@@ -501,7 +495,6 @@ def build_rows_for_date(target_date):
             rows.append(row)
             processed += 1
 
-            # log di progresso ogni 50 partite realmente elaborate
             if processed % 50 == 0:
                 print(f"# Progress fixtures (filtrate): {processed}", file=sys.stderr)
 
@@ -524,8 +517,7 @@ def is_valid_competition(row):
     - calcio femminile
     - U17
     - amichevoli
-    - coppe nazionali (FA Cup, Coppa Italia, ecc.)
-      ma NON esclude Champions / Europa / Libertadores ecc.
+    - coppe nazionali
     """
     lname = (row.get("league_name") or "").lower()
     rnd = (row.get("round") or "").lower()
@@ -545,12 +537,10 @@ def is_valid_competition(row):
     if any(tok in lname for tok in friendly_tokens):
         return False
 
-    # Coppe nazionali
-    # Esempi: FA Cup, Coppa Italia, Copa del Rey, Taça, Pokal...
+    # Coppe nazionali (ma non Champions / Libertadores ecc.)
     cup_tokens = ["cup", "coppa", "copa", "taça", "pokal", "coupe", "taça", "杯"]
-    # Competizioni che NON vogliamo escludere anche se contengono "cup"
     keep_if_contains = [
-        "champions",         # Champions League
+        "champions",
         "libertadores",
         "sudamericana",
         "confederations",
@@ -564,10 +554,6 @@ def is_valid_competition(row):
 
 
 def form_score(form_str, window=5):
-    """
-    Converte la stringa di forma (es. 'WWLWD') in un punteggio.
-    W=3, D=1, L=0 sugli ultimi N match.
-    """
     if not form_str:
         return 0
     s = str(form_str).strip().upper()
@@ -588,9 +574,6 @@ def poisson_pmf(k, lam):
 
 
 def prob_goals_at_least(lam, min_goals, max_goals=10):
-    """
-    P(TotGol >= min_goals) con Poisson(lam), tagliata a max_goals.
-    """
     if lam is None or lam <= 0:
         return 0.0
     p_leq = 0.0
@@ -600,11 +583,6 @@ def prob_goals_at_least(lam, min_goals, max_goals=10):
 
 
 def estimate_lambdas(row):
-    """
-    Stima λ_home e λ_away usando:
-    - prediction_goals_home/away
-    - medie gol fatte/subite (home/away)
-    """
     gh_pred = to_float(row.get("prediction_goals_home")) or 0.0
     ga_pred = to_float(row.get("prediction_goals_away")) or 0.0
 
@@ -616,7 +594,6 @@ def estimate_lambdas(row):
     if ga_pred > 0:
         vals_a.append(ga_pred)
 
-    # medie gol a favore / contro
     h_gf_home = to_float(row.get("home_goals_for_avg_home"))
     h_ga_home = to_float(row.get("home_goals_against_avg_home"))
     a_gf_away = to_float(row.get("away_goals_for_avg_away"))
@@ -625,12 +602,12 @@ def estimate_lambdas(row):
     if h_gf_home:
         vals_h.append(h_gf_home)
     if a_ga_away:
-        vals_h.append(a_ga_away)   # gol concessi in trasferta dall'avversaria
+        vals_h.append(a_ga_away)
 
     if a_gf_away:
         vals_a.append(a_gf_away)
     if h_ga_home:
-        vals_a.append(h_ga_home)   # gol concessi in casa dall'avversaria
+        vals_a.append(h_ga_home)
 
     lam_h = sum(vals_h) / len(vals_h) if vals_h else 1.2
     lam_a = sum(vals_a) / len(vals_a) if vals_a else 1.0
@@ -651,7 +628,6 @@ def generate_picks(rows):
             home = r["home_team"]
             away = r["away_team"]
 
-            # Probabilità previste API-Football (in %)
             prob_home_pct = to_float(r.get("prob_home"))
             prob_draw_pct = to_float(r.get("prob_draw"))
             prob_away_pct = to_float(r.get("prob_away"))
@@ -660,23 +636,20 @@ def generate_picks(rows):
             prob_draw = (prob_draw_pct or 0.0) / 100.0
             prob_away = (prob_away_pct or 0.0) / 100.0
 
-            # λ stimati + exp_goals
             lam_h, lam_a = estimate_lambdas(r)
             lam_total = lam_h + lam_a
 
-            # Odds principali
             oh = to_float(r.get("odd_home"))
             od = to_float(r.get("odd_draw"))
             oa = to_float(r.get("odd_away"))
 
             o_o15 = to_float(r.get("odd_ou_1_5_over"))
             o_o25 = to_float(r.get("odd_ou_2_5_over"))
-            o_u25 = to_float(r.get("odd_ou_2_5_under"))  # non lo usiamo, ma lo leggo comunque
+            o_u25 = to_float(r.get("odd_ou_2_5_under"))
             o_o35 = to_float(r.get("odd_ou_3_5_over"))
             o_btts_y = to_float(r.get("odd_btts_yes"))
             o_btts_n = to_float(r.get("odd_btts_no"))
 
-            # Over 1.5 rate dai dati under/over
             home_over15_for = to_float(r.get("home_ou_1_5_for_over")) or 0.0
             home_over15_against = to_float(r.get("home_ou_1_5_against_over")) or 0.0
             away_over15_for = to_float(r.get("away_ou_1_5_for_over")) or 0.0
@@ -689,36 +662,29 @@ def generate_picks(rows):
             tot_games = home_games + away_games if home_games and away_games else max(home_games, away_games, 1.0)
 
             over15_count = home_over15_for + home_over15_against + away_over15_for + away_over15_against
-            over15_rate = safe_div(over15_count, tot_games)  # tra 0 e >1, lo clampiamo dopo
-
+            over15_rate = safe_div(over15_count, tot_games)
             if over15_rate > 1:
                 over15_rate = 1.0
 
-            # Forma squadre
             home_form = form_score(r.get("home_form"))
             away_form = form_score(r.get("away_form"))
 
-            # Medie gol
             h_gf_home = to_float(r.get("home_goals_for_avg_home")) or 0.0
             h_ga_home = to_float(r.get("home_goals_against_avg_home")) or 0.0
             a_gf_away = to_float(r.get("away_goals_for_avg_away")) or 0.0
             a_ga_away = to_float(r.get("away_goals_against_avg_away")) or 0.0
 
-            # Poisson: probabilità sugli over
             p_over15 = prob_goals_at_least(lam_total, 2)
             p_over25 = prob_goals_at_least(lam_total, 3)
             p_over35 = prob_goals_at_least(lam_total, 4)
 
-            # Probabilità BTTS con Poisson
-            # P(BTTS) = 1 - P(H=0) - P(A=0) + P(H=0)*P(A=0)
             p_h0 = math.exp(-lam_h) if lam_h > 0 else 1.0
             p_a0 = math.exp(-lam_a) if lam_a > 0 else 1.0
             p_btts = 1.0 - p_h0 - p_a0 + p_h0 * p_a0
             p_btts = max(0.0, min(1.0, p_btts))
 
-            # ---------- MODELLI OVER / BTTS ----------
+            # ---------- OVER / BTTS ----------
 
-            # O1.5 SAFE (rimane la base "sicura")
             if o_o15 and 1.20 <= o_o15 <= 1.40:
                 if lam_total >= 1.9 and over15_rate >= 0.70 and p_over15 >= 0.80:
                     p_imp = 1.0 / o_o15
@@ -738,13 +704,12 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # O1.5 VALUE (quote un po' più alte, 1.35–1.60)
             if o_o15 and 1.35 <= o_o15 <= 1.60:
                 if lam_total >= 2.1 and over15_rate >= 0.65 and p_over15 >= 0.75:
                     p_imp = 1.0 / o_o15
                     prob_model = max(p_over15, over15_rate)
                     value = prob_model - p_imp
-                    if value > 0.05:  # almeno +5 punti di value
+                    if value > 0.05:
                         score = value + (prob_model - 0.75) + (lam_total - 2.1) * 0.1
 
                         picks.append({
@@ -759,7 +724,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # O2.5 VALUE
             if o_o25 and 1.60 <= o_o25 <= 2.20:
                 if lam_total >= 2.5 and p_over25 >= 0.55:
                     p_imp = 1.0 / o_o25
@@ -779,7 +743,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # O3.5 HIGH RISK
             if o_o35 and 1.90 <= o_o35 <= 3.00:
                 if lam_total >= 3.1 and p_over35 >= 0.35:
                     p_imp = 1.0 / o_o35
@@ -799,7 +762,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # BTTS YES STRONG
             if o_btts_y and 1.50 <= o_btts_y <= 2.00:
                 if p_btts >= 0.60 and lam_h >= 0.9 and lam_a >= 0.9:
                     p_imp = 1.0 / o_btts_y
@@ -819,7 +781,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # BTTS YES VALUE (quote un po' più alte)
             if o_btts_y and 1.70 <= o_btts_y <= 2.20:
                 if p_btts >= 0.55 and lam_total >= 2.4:
                     p_imp = 1.0 / o_btts_y
@@ -839,7 +800,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # Eventuale BTTS NO strong (solo se proprio chiuso)
             if o_btts_n and 1.50 <= o_btts_n <= 2.20:
                 if p_btts <= 0.35 and lam_total <= 2.0:
                     p_imp = 1.0 / o_btts_n
@@ -859,13 +819,11 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # ---------- MODELLI 1X2 / COMBO ----------
+            # ---------- 1X2 / COMBO ----------
 
-            # Indici "forza"
             home_strength = (h_gf_home - h_ga_home)
             away_strength = (a_gf_away - a_ga_away)
 
-            # HOME WIN STRONG basato su stats+forma
             if oh and 1.40 <= oh <= 1.90 and prob_home > 0:
                 if prob_home >= 0.55 and (home_form - away_form) >= 3 and (home_strength - away_strength) >= 0.5 and lam_h > lam_a:
                     p_imp = 1.0 / oh
@@ -885,7 +843,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # AWAY WIN STRONG (versione speculare)
             if oa and 1.40 <= oa <= 2.20 and prob_away > 0:
                 if prob_away >= 0.55 and (away_form - home_form) >= 3 and (away_strength - home_strength) >= 0.5 and lam_a > lam_h:
                     p_imp = 1.0 / oa
@@ -905,10 +862,9 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # VALUE BET HOME (quote 1.60–2.20 con buon value)
             if oh and 1.60 <= oh <= 2.20 and prob_home > 0:
                 p_imp = 1.0 / oh
-                if prob_home - p_imp >= 0.07:  # almeno +7 punti percentuali
+                if prob_home - p_imp >= 0.07:
                     value = prob_home - p_imp
                     score = value + (prob_home - 0.55)
                     picks.append({
@@ -923,7 +879,6 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # VALUE BET AWAY
             if oa and 1.70 <= oa <= 2.40 and prob_away > 0:
                 p_imp = 1.0 / oa
                 if prob_away - p_imp >= 0.07:
@@ -941,13 +896,10 @@ def generate_picks(rows):
                         "score": score,
                     })
 
-            # Double chance 1X + Over 1.5 (stima quota)
             if prob_home > 0 and prob_draw > 0 and o_o15:
                 prob1x = prob_home + prob_draw
                 if prob1x >= 0.75 and p_over15 >= 0.75 and o_o15 >= MIN_ODD:
-                    # quota DC 1X stimata (più bassa dell'1)
                     q1x_est = max(1.25, min(1.70, (oh or 1.50) * 0.65))
-                    # combo con O1.5 leggermente più alta
                     q_combo = max(1.35, min(1.90, q1x_est * 1.10))
                     p_imp = 1.0 / q_combo
                     prob_model = min(0.99, prob1x * p_over15)
@@ -966,7 +918,6 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # Double chance X2 + Over 1.5
             if prob_away > 0 and prob_draw > 0 and o_o15:
                 probx2 = prob_away + prob_draw
                 if probx2 >= 0.75 and p_over15 >= 0.75 and o_o15 >= MIN_ODD:
@@ -989,10 +940,8 @@ def generate_picks(rows):
                             "score": score,
                         })
 
-            # Winner + Over 1.5 (combo "virtuale")
             if oh and o_o15 and prob_home > 0:
                 if oh >= 1.35 and p_over15 >= 0.75:
-                    # quota combo stimata (non reale, ma serve per ranking)
                     q_combo = max(1.50, min(2.40, oh * 1.10))
                     p_imp = 1.0 / q_combo
                     prob_model = min(0.99, prob_home * p_over15)
@@ -1035,7 +984,6 @@ def generate_picks(rows):
             print("# ERR PICK", e, file=sys.stderr)
             continue
 
-    # ordiniamo per score decrescente
     picks.sort(key=lambda x: x["score"], reverse=True)
     print(f"# TOT picks candidate: {len(picks)}", file=sys.stderr)
     return picks
@@ -1053,26 +1001,20 @@ def build_categories(picks):
         "VALUE_PICKS": [],
     }
 
-    # TOP 5 e BEST TIPS usano il ranking globale
     cats["TOP_5_TIPS"] = picks[:5]
     cats["BEST_TIPS_OF_DAY"] = picks[:15]
 
-    # SAFE_PICKS: modelli marcati come SAFE_PICKS + quota contenuta
     safe = [p for p in picks if p["category"] == "SAFE_PICKS" and 1.20 <= (p["odd"] or 0) <= 1.65]
     cats["SAFE_PICKS"] = safe[:15]
 
-    # OVER/UNDER TIPS
     ou = [p for p in picks if p["category"] == "OVER_UNDER_TIPS"]
     cats["OVER_UNDER_TIPS"] = ou[:25]
 
-    # VALUE_PICKS
     val = [p for p in picks if p["category"] == "VALUE_PICKS"]
     cats["VALUE_PICKS"] = val[:20]
 
-    # SINGLE GAME: la miglior pick in assoluto
     cats["SINGLE_GAME"] = picks[:1]
 
-    # DAILY 2+ODDS: selezione di SAFE con prodotto ~2
     ticket = []
     prod = 1.0
     for p in safe:
@@ -1083,7 +1025,6 @@ def build_categories(picks):
             break
     cats["DAILY_2PLUS"] = ticket
 
-    # DAILY 10+ODDS: picks a quota medio-bassa, ma da combinare
     ticket10 = []
     prod10 = 1.0
     for p in picks:
@@ -1099,14 +1040,10 @@ def build_categories(picks):
 
 
 # ==========================
-# SHEETDB (DEBUG)
+# SHEETDB
 # ==========================
 
 def sheetdb_clear_sheet(sheet_name):
-    """
-    Per ora NON cancelliamo niente, stampiamo solo nei log.
-    Così non facciamo DELETE strane su SheetDB.
-    """
     print(f"# SheetDB: clear DISABLED for sheet={sheet_name}", file=sys.stderr)
 
 
@@ -1115,7 +1052,7 @@ def sheetdb_append_rows(sheet_name, rows):
         print(f"# SheetDB: nessuna riga da inviare per sheet={sheet_name}", file=sys.stderr)
         return
 
-    BATCH_SIZE = 60  # puoi alzare/abbassare se vuoi
+    BATCH_SIZE = 60
 
     try:
         total = len(rows)
@@ -1140,21 +1077,16 @@ def sheetdb_append_rows(sheet_name, rows):
                 file=sys.stderr,
             )
 
-            # piccolo delay per non martellare
             time.sleep(0.2)
 
     except Exception as e:
         print(f"# ERRORE SheetDB append sheet={sheet_name}: {e}", file=sys.stderr)
 
 
-
-
 def push_raw_and_picks_to_sheetdb(rows, categories):
-    # 1) RAW: appendiamo tutte le righe grezze
     sheetdb_clear_sheet("RAW")
     sheetdb_append_rows("RAW", rows)
 
-    # 2) Costruiamo una mappa fixture_id -> info base (data/ora/lega/paese)
     fixture_info = {}
     for r in rows:
         fid = r.get("fixture_id")
@@ -1167,7 +1099,6 @@ def push_raw_and_picks_to_sheetdb(rows, categories):
             "country": r.get("country", ""),
         }
 
-    # 3) Prepariamo le righe per il foglio PICKS
     out = []
     run_date = today_str()
 
@@ -1175,22 +1106,16 @@ def push_raw_and_picks_to_sheetdb(rows, categories):
         for p in plist:
             info = fixture_info.get(p["fixture_id"], {})
             out.append({
-                # quando abbiamo lanciato la pipeline
                 "run_date": run_date,
-                # data/ora della partita
                 "match_date": info.get("match_date", ""),
                 "match_time": info.get("match_time", ""),
-                # info torneo
                 "league": info.get("league", p.get("league", "")),
                 "country": info.get("country", ""),
-                # classificazione interna
                 "category": cat_name,
                 "model": p["model"],
-                # match
                 "fixture_id": p["fixture_id"],
                 "home": p["home"],
                 "away": p["away"],
-                # pick
                 "pick": p["pick"],
                 "odd": p["odd"],
                 "score": round(p["score"], 3),
@@ -1265,11 +1190,8 @@ def start_pipeline_async():
     t.start()
     return True
 
+
 def start_results_checker_async(date_str=None):
-    """
-    Lancia il result checker (results_checker.py) in background,
-    importando la funzione run_results_checker dal file separato.
-    """
     def _worker():
         try:
             from results_checker import run_results_checker
@@ -1284,7 +1206,6 @@ def start_results_checker_async(date_str=None):
     return True
 
 
-
 # ==========================
 # HTTP SERVER PER RENDER
 # ==========================
@@ -1296,9 +1217,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         secret_conf = os.environ.get("RUN_SECRET", "")
 
-        # ------------------------------
-        # /run -> avvia pipeline scraper
-        # ------------------------------
         if parsed.path == "/run":
             if secret_conf:
                 key = qs.get("key", [""])[0]
@@ -1324,9 +1242,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(text.encode("utf-8"))
             return
 
-        # -----------------------------------
-        # /check_results -> lancia result checker
-        # -----------------------------------
         elif parsed.path == "/check_results":
             if secret_conf:
                 key = qs.get("key", [""])[0]
@@ -1337,7 +1252,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(b"Forbidden\n")
                     return
 
-            # opzionale: ?date=YYYY-MM-DD
             date_param = qs.get("date", [None])[0]
             start_results_checker_async(date_param)
 
@@ -1347,9 +1261,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"Results checker avviato in background")
             return
 
-        # ------------------------------
-        # qualsiasi altra path -> OK
-        # ------------------------------
         else:
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -1357,10 +1268,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"OK\n")
 
     def log_message(self, format, *args):
-        # niente log HTTP rumorosi
         pass
-
-
 
 
 class ReuseTCPServer(socketserver.TCPServer):
@@ -1376,14 +1284,3 @@ def run_http_server():
 
 if __name__ == "__main__":
     run_http_server()
-
-
-
-
-
-
-
-
-
-
-
